@@ -19,8 +19,8 @@ class SandboxieController:
     """
 
     # 默认安装路径（根据你的实际安装位置修改）
-    DEFAULT_START_EXE = r"D:\local_program\Sandboxie-Plus\Start.exe"
-    DEFAULT_SBIEINI_EXE = r"D:\local_program\Sandboxie-Plus\SbieIni.exe"
+    DEFAULT_START_EXE = r"Start.exe"
+    DEFAULT_SBIEINI_EXE = r"SbieIni.exe"
 
     def __init__(self, start_exe_path: str = None, sbieini_exe_path: str = None, sandbox_name: str = "DefaultBox"):
         self.start_exe_path = start_exe_path or self.DEFAULT_START_EXE
