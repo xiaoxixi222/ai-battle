@@ -49,7 +49,17 @@ Manager（沙盒外，AI 不可见）↔ System 沙盒（API）+ AI 客户端（
 
 scope 限定：`manager|system|judge|commentary|sandbox|client|gui|web|api|rules|docs`
 
-示例：`feat(sandbox): 添加沙盒池多实例并发管理`
+commit body 必须包含本次修改的各文件及其变更目的说明（参考现有提交历史风格）。
+
+示例：
+```
+chore(docs): 添加 AGENTS.md 和 .gitignore
+
+AGENTS.md - Agent 指南文件，包含项目性质、环境命令、项目阶段、
+架构说明、设计文档索引和提交规范
+
+.gitignore - Python 项目标准忽略规则，排除虚拟环境、缓存、IDE 和系统文件
+```
 
 ## 配置格式
 比赛配置为 JSON（非 YAML/TOML），schema 见启动与运行设计文档。
