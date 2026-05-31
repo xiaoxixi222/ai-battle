@@ -1,0 +1,25 @@
+# 虚拟环境
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+
+# 缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统
+.DS_Store
+Thumbs.db
