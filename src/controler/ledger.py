@@ -2,7 +2,8 @@
 
 每条事件带 t（墙钟时间）与 rel（对局相对秒数，便于回放）。事件类型至少在：
 spawn / boot_ok / boot_fail / syscall / owner_sample / owner_change / score /
-crash / restart / rollback / recovery_enter / recovery_exit / full_reset / end。
+crash / restart / rollback / recovery_enter / recovery_commit / recovery_exit /
+full_reset / end。
 """
 
 from __future__ import annotations

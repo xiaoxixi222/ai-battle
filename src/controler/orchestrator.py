@@ -6,7 +6,8 @@
 - 计分与账本：owner 采样、夺权、崩溃阶梯、各项惩罚；
 - 快照回滚：每次启动成功打快照，坏代码回滚到 stable；
 - 崩溃检测：进程存活 + kernel_status 超时双通道；
-- 抢救室：服务器起不来时，owner 走极简文件服务修复后再试。
+- 抢救室：服务器起不来时，把真实战场原样复制进 owner 的工作区（rescue/）；
+  owner 用原生工具修完发一条请求，内核把工作区镜像搬回并重启。
 
 失败树（《核心规则》第七节）：
 
@@ -15,8 +16,9 @@
       └─ 失败 → -500 → 回滚 → 重启
            ├─ 成功 → 继续
            └─ 失败 → 抢救室（时限 180s，仅 owner 可操作）
-                ├─ 修复后启动成功 → 继续
-                └─ 修复后仍失败（或超时）→ -1000 → 强制回滚 → 重启
+                ├─ 战场原样复制进 owner 工作区（rescue/）→ owner 修 → 请求搬回
+                ├─ 搬回后启动成功 → 继续
+                └─ 搬回后仍失败（或超时）→ -1000 → 强制回滚 → 重启
                      ├─ 成功 → 继续
                      └─ 仍然失败 → 全量重置 → 重启
                           ├─ 成功 → 继续
@@ -141,6 +143,7 @@ class Match:
         self.last_rights: dict[int, int] = {}
         self.recovery_owner: int | None = None
         self.recovery_deadline: float = float("inf")
+        self.recovery_workspace: Path | None = None
         self.recent: deque[str] = deque(maxlen=4)
 
         self.t0: float = 0.0
@@ -262,6 +265,20 @@ class Match:
             "ledger": str(self.ledger.path),
         }
 
+    def workspace_dir(self, ai_id: int) -> Path:
+        """AI 的本地工作区（开发期代演路径；M3 起由 AI 容器挂载同一份）。"""
+        return self.match_dir / "workspaces" / f"ai-{ai_id}"
+
+    def rescue_briefing(self) -> str:
+        """抢救室里给 owner 的说明：要干什么、还有多久、修不好会怎样。"""
+        seconds = f"{self.config.recovery_timeout_sec:g}"
+        return (
+            "[抢救室] 服务器启动失败，比赛停摆。你是 owner，只有你能进这里修它。"
+            "真实服务器的代码与状态已原样复制到你的工作区：rescue/server/ 与 rescue/state/。"
+            "改它、测它；修好后发一条重启请求——系统会把 rescue/ 原样搬回服务器并尝试启动。"
+            f"你还有 {seconds} 秒。修不好或超时：-1000，系统强制回滚。"
+        )
+
     def briefing(self, ai_id: int) -> str:
         """给某个 AI 的对局简报（M3 的 /game/briefing 与 mock 共用同一份）。"""
         elapsed = max(0.0, self.clock() - self.t0) if self.t0 else 0.0
@@ -284,6 +301,8 @@ class Match:
         lines = [header, f"比分：{scores_txt}"]
         if self.recent:
             lines.append("最近：" + "；".join(self.recent))
+        if self.state == "recovery" and ai_id == self.recovery_owner:
+            lines.append(self.rescue_briefing())
         return "\n".join(lines)
 
     def forward_syscall(self, ai_id: int, raw: str) -> tuple[bool, str]:
@@ -479,24 +498,46 @@ class Match:
         return True
 
     def _enter_recovery(self) -> None:
-        """开抢救室：只等 owner 来修；到期或修砸了走 -1000 链。"""
+        """开抢救室：把战场原样复制进 owner 工作区，只等它来修（或超时）。"""
         self.state = "recovery"
         self.up = False
         self.recovery_owner = self.last_owner
         self.recovery_deadline = self.clock() + self.config.recovery_timeout_sec
+        self.recovery_workspace = None
+        staged: str | None = None
+        if self.recovery_owner is not None:
+            workspace = self.workspace_dir(self.recovery_owner)
+            try:
+                self.recovery.stage(workspace)
+            except (OSError, shutil.Error) as err:
+                self.ledger.log("recovery_stage_fail", owner=self.recovery_owner, error=str(err))
+                self._note("战场复制进工作区失败")
+            else:
+                self.recovery_workspace = workspace
+                staged = str(workspace)
         self.ledger.log(
             "recovery_enter",
             owner=self.recovery_owner,
             timeout_s=self.config.recovery_timeout_sec,
+            workspace=staged,
         )
         self._note(f"进入抢救室（仅 {self._owner_txt(self.recovery_owner)} 可操作）")
 
     def _recovery_boot_attempt(self) -> None:
-        """抢救室里的一句话：修好了，重启试试。"""
+        """抢救室里的一句话：把工作区镜像搬回，再重启试试。"""
+        if self.recovery_workspace is not None:
+            try:
+                self.recovery.commit(self.recovery_workspace)
+            except (OSError, shutil.Error) as err:
+                self.ledger.log("recovery_commit_fail", error=str(err))
+                self._note("镜像搬回失败")
+            else:
+                self.ledger.log("recovery_commit", workspace=str(self.recovery_workspace))
         if self._attempt_boot("recovery"):
             self.state = "running"
             self.recovery_owner = None
             self.recovery_deadline = float("inf")
+            self.recovery_workspace = None
             self.ledger.log("recovery_exit", outcome="ok")
             self._note("抢救成功，比赛继续")
             return
@@ -510,6 +551,7 @@ class Match:
         self.state = "running"  # 回到常规态（此刻服务器仍未起来）
         self.recovery_owner = None
         self.recovery_deadline = float("inf")
+        self.recovery_workspace = None
         self.up = False
         self.scores.penalty(owner, self.config.scores.recovery_fail, "recovery_fail")
         self._rollback("forced_rollback")
@@ -600,9 +642,9 @@ class Match:
     # ================================================================ 小工具
 
     def _request_boot_from_recovery(self) -> None:
-        """抢救室收到 reboot：登记待办，编排器下一步真正去启动。"""
+        """抢救室收到一条请求：登记待办，编排器下一步搬回镜像并启动。"""
         self._pending_boot = True
-        self._note("owner 在抢救室请求重启")
+        self._note("owner 请求搬回并重启")
 
     def _collect_control(self, grace: float = 0.0) -> None:
         """收罗控制面消息：把重启请求记成待办。"""

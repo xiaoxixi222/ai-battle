@@ -1,115 +1,59 @@
-"""抢救室：服务器起不来时的内核极简文件服务。
+"""抢救室（v0.2）：服务器起不来时，把真实战场原样交到 owner 的工作区。
 
 - 只有 owner 能进（路由在编排器/网关层做，这里只认「被放进来了」）；
-- 支持 read / write / delete / reboot；范围只限 battle/server 与 battle/state；
-- **不做先读校验**——抢救分秒必争；
-- reboot 不在这里执行：登记一个待办，由编排器真正去启动。
-
-极简意味着：read 一次性返回全文（有上限），没有分页、没有行号。
+- stage：把 battle/server 与 battle/state 原样复制进 <工作区>/rescue/（git 与缓存除外）；
+- commit：镜像搬回——先清空 battle/server 与 battle/state，再把 rescue/ 原样复制回去；
+- 门不解析请求：任何一条 syscall 都当作「搬回并重启」的按钮（原文没有格式可言）；
+- 真正的启动不在这里执行：登记一个待办，由编排器去尝试。
 """
 
 from __future__ import annotations
 
-import json
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from snapshot import force_rmtree
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-_READ_LIMIT = 200_000
-_OPS = "read / write / delete / reboot"
+_IGNORE = shutil.ignore_patterns("__pycache__", ".git")
+_RECEIPT = "重启请求已受理：系统正把 rescue/ 原样搬回服务器并尝试启动。"
 
 
 class RecoveryRoom:
-    """对 owner 开放的极简文件服务（临时基座）。"""
+    """owner 的工作区抢救台：把战场复制出去、把修改镜像搬回。"""
 
     def __init__(self, battle_root: Path, request_boot: Callable[[], None]) -> None:
         """绑定战场目录与「请求重启」回调。"""
         self.battle_root = Path(battle_root).resolve()
-        self.scopes = (self.battle_root / "server", self.battle_root / "state")
         self.request_boot = request_boot
 
-    def handle(self, _ai_id: int, raw: str) -> tuple[bool, str]:
-        """处理一条抢救室请求。"""
-        try:
-            req = json.loads(raw)
-        except json.JSONDecodeError:
-            req = None
-        if not isinstance(req, dict):
-            return False, "抢救室：请求必须是合法 JSON 对象。"
-        op = req.get("op")
-        if op == "reboot":
-            self.request_boot()
-            return True, "重启请求已受理：内核马上尝试启动服务器。修好了没有？"
-        if op == "read":
-            return self._read(req.get("path"))
-        if op == "write":
-            return self._write(req.get("path"), req.get("content"))
-        if op == "delete":
-            return self._delete(req.get("path"))
-        return False, f"抢救室只支持 {_OPS}。"
+    # ---- 搬运 ----
 
-    # ---- 路径范围 ----
+    def stage(self, workspace: Path) -> Path:
+        """把真实战场原样复制进工作区 rescue/（旧的先清空），返回 rescue 目录。"""
+        rescue = Path(workspace).resolve() / "rescue"
+        if rescue.exists():
+            force_rmtree(rescue)
+        rescue.mkdir(parents=True)
+        shutil.copytree(self.battle_root / "server", rescue / "server", ignore=_IGNORE)
+        shutil.copytree(self.battle_root / "state", rescue / "state", ignore=_IGNORE)
+        return rescue
 
-    def _in_scope(self, raw_path: object) -> Path | None:
-        """把请求路径解析到范围内；越界返回 None。"""
-        if not isinstance(raw_path, str) or not raw_path:
-            return None
-        p = Path(raw_path)
-        candidate = p if p.is_absolute() else (self.battle_root / p)
-        try:
-            resolved = candidate.resolve()
-        except OSError:
-            return None
-        for scope in self.scopes:
-            if resolved.is_relative_to(scope):
-                return resolved
-        return None
+    def commit(self, workspace: Path) -> None:
+        """镜像搬回：先清空两处目标，再把 rescue/ 原样复制回去（删除也会传播）。"""
+        rescue = Path(workspace).resolve() / "rescue"
+        for name in ("server", "state"):
+            target = self.battle_root / name
+            if target.exists():
+                force_rmtree(target)
+            shutil.copytree(rescue / name, target, ignore=_IGNORE)
 
-    # ---- 四个操作 ----
+    # ---- 门 ----
 
-    def _read(self, raw_path: object) -> tuple[bool, str]:
-        path = self._in_scope(raw_path)
-        if path is None:
-            return False, "抢救室范围只限 battle/server 与 battle/state。"
-        if path.is_dir():
-            entries = sorted(
-                entry.name + ("/" if entry.is_dir() else "") for entry in path.iterdir()
-            )
-            return True, "\n".join(entries) if entries else "（空目录）"
-        if not path.exists():
-            return False, f"文件不存在：{path}"
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as err:
-            return False, f"读取失败：{err}"
-        if len(text) > _READ_LIMIT:
-            return True, text[:_READ_LIMIT] + f"\n…（已截断，共 {len(text)} 字符）"
-        return True, text
-
-    def _write(self, raw_path: object, content: object) -> tuple[bool, str]:
-        path = self._in_scope(raw_path)
-        if path is None:
-            return False, "抢救室范围只限 battle/server 与 battle/state。"
-        text = content if isinstance(content, str) else ""
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
-        except OSError as err:
-            return False, f"写入失败：{err}"
-        return True, f"已写入 {len(text)} 字符：{path}"
-
-    def _delete(self, raw_path: object) -> tuple[bool, str]:
-        path = self._in_scope(raw_path)
-        if path is None:
-            return False, "抢救室范围只限 battle/server 与 battle/state。"
-        if not path.exists():
-            return False, f"文件不存在：{path}"
-        if path.is_dir():
-            return False, "抢救室只删文件，不删目录。"
-        try:
-            path.unlink()
-        except OSError as err:
-            return False, f"删除失败：{err}"
-        return True, f"已删除：{path}"
+    def handle(self, _ai_id: int, _raw: str) -> tuple[bool, str]:
+        """抢救室里的 syscall：不解析原文，一律按「搬回并重启」受理。"""
+        self.request_boot()
+        return True, _RECEIPT

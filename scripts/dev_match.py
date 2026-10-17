@@ -1,7 +1,7 @@
 """M2 验收：内核全场演练（假时钟 + mock AI + 真进程 + 真 git 快照）。
 
 覆盖：启动握手、令牌盖章、原文透传、夺权与持久化、崩溃阶梯、启动失败回滚、
-抢救室（成功与失败两条链）、挂起检测、king 开局、以及可选的 docker 运行器。
+抢救室 v0.2（工作区镜像；成功与失败两条链）、挂起检测、king 开局、以及可选的 docker 运行器。
 
 用法：
 
@@ -423,9 +423,12 @@ def _fixed_state(match: Match) -> str:
 
 
 def _s4_common_plans(
-    holder: dict[str, Any], rescue_reboot: Callable[[MockContext], bool]
+    holder: dict[str, Any], rescue_step: Callable[[MockContext], bool]
 ) -> dict[int, list[MockStep]]:
-    """S4/S5 共用的夺权 → 持久化 → 埋毒 → 再引爆 剧本。"""
+    """S4/S5 共用的夺权 → 持久化 → 埋毒 → 再引爆 → 进抢救室 剧本。
+
+    rescue_step 是「owner 在抢救室里干的那件事」：S4 修好再重启，S5 不修直接重启。
+    """
 
     def a2_grants(ctx: MockContext) -> bool:
         p = ctx.match.battle_dir / "state" / "state.json"
@@ -466,30 +469,23 @@ def _s4_common_plans(
         _ok, _out = ctx.tool({"op": "bash", "command": crash_command(), "timeout": 15000})
         return True
 
-    def a2_out_of_scope(ctx: MockContext) -> bool:
+    def a2_see_rescue(ctx: MockContext) -> bool:
         if ctx.match.state != "recovery":
             return False
-        ok, out = ctx.tool(
-            {
-                "op": "write",
-                "path": str(ctx.match.battle_dir / "home" / "1" / "hack.txt"),
-                "content": "x",
-            }
-        )
-        holder["scope_reject"] = (not ok) and ("范围" in out)
-        return True
-
-    def a2_see_recovery(ctx: MockContext) -> bool:
-        if ctx.match.state != "recovery":
+        ws = ctx.match.workspace_dir(2)
+        state_file = ws / "rescue" / "state" / "state.json"
+        if not state_file.exists():
             return False
-        ok, out = ctx.tool(
-            {"op": "read", "path": str(ctx.match.battle_dir / "state" / "state.json")}
+        holder["poison_visible"] = "poison" in state_file.read_text(encoding="utf-8")
+        holder["rescue_code_ok"] = (ws / "rescue" / "server" / "ops.py").exists()
+        holder["rescue_briefing_ok"] = (
+            "[抢救室]" in ctx.match.briefing(2) and "[抢救室]" not in ctx.match.briefing(3)
         )
-        if not ok:
-            return False
-        visible = "poison" in out
-        holder["poison_visible"] = visible
-        return visible
+        return (
+            holder["poison_visible"] is True
+            and holder["rescue_code_ok"] is True
+            and holder["rescue_briefing_ok"] is True
+        )
 
     def a3_locked_out(ctx: MockContext) -> bool:
         if ctx.match.state != "recovery":
@@ -507,34 +503,32 @@ def _s4_common_plans(
             a2_reboot,
             a2_poison,
             a2_crash2,
-            a2_out_of_scope,
-            a2_see_recovery,
-            rescue_reboot,
+            a2_see_rescue,
+            rescue_step,
         ],
         3: [a3_locked_out],
     }
 
 
 def scenario_recovery_ok(checks: Checks) -> None:
-    """S4 抢救室（成功）：启动失败两次 → 仅 owner 可进 → 修好 state → 重启成功。"""
+    """S4 抢救室（成功）：启动失败两次 → 战场镜像进工作区 → owner 修好 → 搬回重启。"""
     holder: dict[str, Any] = {}
 
     def a2_fix(ctx: MockContext) -> bool:
         if ctx.match.state != "recovery":
             return False
-        ok, _ = ctx.tool(
-            {
-                "op": "write",
-                "path": str(ctx.match.battle_dir / "state" / "state.json"),
-                "content": _fixed_state(ctx.match),
-            }
-        )
-        return ok
+        # v0.2：owner 用「原生工具」直接改工作区里的镜像（开发期用文件 IO 代演）
+        path = ctx.match.workspace_dir(2) / "rescue" / "state" / "state.json"
+        if not path.exists():
+            return False
+        path.write_text(_fixed_state(ctx.match), encoding="utf-8")
+        holder["fixed_in_ws"] = True
+        return True
 
     def a2_reboot_rescue(ctx: MockContext) -> bool:
         if ctx.match.state != "recovery":
             return False
-        ok, out = ctx.tool({"op": "reboot"})
+        ok, out = ctx.tool("重启")  # v0.2：原文不解析，随便发一条都当作重启请求
         holder["rescue_reboot"] = out
         return ok
 
@@ -563,9 +557,20 @@ def scenario_recovery_ok(checks: Checks) -> None:
     checks.check(
         "S4 -500 扣给当时 owner AI-2", len(find(rows, "score", ai=2, reason="boot_fail")) == 1
     )
-    checks.check("S4 毒状态在抢救室里可见", holder.get("poison_visible") is True)
+    staged = str(entries[0].get("workspace")) if entries else ""
+    checks.check(
+        "S4 战场镜像进 owner 工作区",
+        bool(staged) and Path(staged) == match.workspace_dir(2),
+        staged,
+    )
+    checks.check("S4 毒状态随镜像进工作区", holder.get("poison_visible") is True)
+    checks.check("S4 镜像里带真实代码", holder.get("rescue_code_ok") is True)
+    checks.check("S4 owner 简报里有抢救说明", holder.get("rescue_briefing_ok") is True)
     checks.check("S4 其他 AI 被挡（系统抢救中）", holder.get("locked_out") is True)
-    checks.check("S4 抢救室范围外写入被拒", holder.get("scope_reject") is True)
+    checks.check("S4 owner 的修复发生在工作区", holder.get("fixed_in_ws") is True)
+    checks.check("S4 工作区修改被镜像搬回", len(find(rows, "recovery_commit")) == 1)
+    on_disk = (match.battle_dir / "state" / "state.json").read_text(encoding="utf-8")
+    checks.check("S4 毒状态被搬回的镜像替换", "poison" not in on_disk)
     exits = find(rows, "recovery_exit")
     checks.check("S4 抢救成功退出", len(exits) == 1 and exits[0].get("outcome") == "ok", str(exits))
     checks.check(
@@ -593,7 +598,7 @@ def scenario_recovery_fail(checks: Checks) -> None:
     def a2_reboot_no_fix(ctx: MockContext) -> bool:
         if ctx.match.state != "recovery":
             return False
-        ok, _out = ctx.tool({"op": "reboot"})
+        ok, _out = ctx.tool("重启")  # v0.2：不修也发一条；镜像照搬回去，然后启动失败
         return ok
 
     plans = _s4_common_plans(holder, a2_reboot_no_fix)
@@ -606,6 +611,10 @@ def scenario_recovery_fail(checks: Checks) -> None:
     checks.check(
         "S5 抢救失败退出", len(exits) == 1 and exits[0].get("outcome") == "fail", str(exits)
     )
+    checks.check(
+        "S5 失败原因是 fix_failed", len(exits) == 1 and exits[0].get("reason") == "fix_failed"
+    )
+    checks.check("S5 未修也镜像搬回", len(find(rows, "recovery_commit")) == 1)
     checks.check("S5 -1000 扣给 AI-2", len(find(rows, "score", ai=2, reason="recovery_fail")) == 1)
     checks.check(
         "S5 强制回滚发生",
