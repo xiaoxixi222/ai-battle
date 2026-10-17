@@ -19,9 +19,9 @@
 ## 仓库结构
 
 ```
-src/controler/   内核（M2，未开工；拼写就是这个）
+src/controler/   内核（M2；编排/网关/计分/账本/快照/抢救室；拼写就是这个）
 src/server/      战斗服务器基座（M1）
-scripts/         开发工具（dev_kernel.py：M1 验收 / mini_kernel.py：迷你内核）
+scripts/         开发工具（dev_kernel.py：M1 验收 / dev_match.py：M2 验收 / mini_kernel.py：迷你内核）
 tests/           pytest 测试（单元 + 端到端）
 rules/           设计文档
 battle/          运行时战场（gitignore；dev_kernel.py 会重建）
@@ -42,16 +42,22 @@ uv run pytest          # 单元 + 端到端测试
 
 # M1 验收：迷你内核拉起基座，跑完整场景断言，退出码非 0 即失败
 uv run python scripts/dev_kernel.py
+
+# M2 验收：假时钟 + mock AI + 真进程 + 真 git 快照，全故障树演练（--docker 追加容器冒烟）
+uv run python scripts/dev_match.py
+
+# 真时钟手跑一场 mock 对局（摘要走 stdout，诊断走 stderr）
+uv run python src/controler/kernel.py --mock tour --duration-min 2
 ```
 
 ## 里程碑
 
-| 阶段 | 内容 |
-|:---|:---|
-| **M1** | 基座服务器：单入口解析、8 个 op、权限阶梯、状态自管、内存访问器、重启通道 |
-| **M2** | 内核：Docker 编排、网关、计分、账本、Git 快照回滚、崩溃检测、抢救室 |
-| **M3** | OpenCode 集成：插件、game agent、容器镜像；首个真实模型对局 |
-| **M4** | 观测 / 解说 / 裁判 |
+| 阶段 | 内容 | 状态 |
+|:---|:---|:---|
+| **M1** | 基座服务器：单入口解析、8 个 op、权限阶梯、状态自管、内存访问器、重启通道 | 已完成 |
+| **M2** | 内核：Docker 编排、网关、计分、账本、Git 快照回滚、崩溃检测、抢救室 | 已完成 |
+| **M3** | OpenCode 集成：插件、game agent、容器镜像；首个真实模型对局 | 待办 |
+| **M4** | 观测 / 解说 / 裁判 | 待办 |
 
 ## 贡献
 

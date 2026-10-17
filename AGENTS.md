@@ -10,15 +10,15 @@
 
 - 项目已推倒重写：旧设计（Sandboxie、Manager/System、v3.0 规则）被有意删除，git 历史里的旧文档**仅考古用，不要复活**。
 - 设计冻结于 v0.1，唯一权威在 `rules/`：《核心规则》《系统架构》《基座 ABI》《OpenCode 集成》。
-- 里程碑：M1 基座服务器（`src/server/`，已完成）→ M2 内核 → M3 OpenCode 集成 → M4 观测。
+- 里程碑：M1 基座服务器（`src/server/`，已完成）→ M2 内核（`src/controler/`，已完成）→ M3 OpenCode 集成 → M4 观测。
 
 ## 目录与入口
 
 | 路径 | 内容 |
 |:---|:---|
-| `src/controler/` | 内核（**拼写就是 controler**，不是 controller）。M2 才开工 |
+| `src/controler/` | 内核（**拼写就是 controler**，不是 controller）。M2：编排、网关、计分、账本、快照、抢救室 |
 | `src/server/` | 战斗服务器基座（M1）。运行时会拷进 `battle/server/` 执行 |
-| `scripts/` | 开发工具：`dev_kernel.py`（M1 验收场景）、`mini_kernel.py`（迷你内核，pytest 复用） |
+| `scripts/` | 开发工具：`dev_kernel.py`（M1 验收）、`dev_match.py`（M2 验收）、`mini_kernel.py`（迷你内核，pytest 复用） |
 | `tests/` | pytest 测试：单元（进程内）+ 端到端（真起进程走 JSONL） |
 | `rules/` | 设计文档（中文，v0.1） |
 | `battle/` | 运行时战场：**gitignore、随时重建**；不要提交、不要手改 |
@@ -29,12 +29,15 @@
 
 - `uv sync` —— 依赖管理只用 uv；运行时零第三方依赖，非必要不新增（基座要能在精简容器里裸跑）
 - `uv run python scripts/dev_kernel.py` —— M1 验收（会重建 `battle/`；退出码非 0 = 失败）
+- `uv run python scripts/dev_match.py` —— M2 验收（假时钟 + mock AI + 真进程 + 真快照；`--docker` 追加容器冒烟；退出码非 0 = 失败）
+- `uv run python src/controler/kernel.py --mock tour --duration-min 2` —— 真时钟手跑一场 mock 对局（摘要走 stdout，诊断走 stderr）
 - `uv run pytest` / `uv run ruff check .` / `uv run mypy` —— 质量三件套（ruff `select=["ALL"]`、mypy `strict`，配置见 `pyproject.toml`）
 
 ## 陷阱（容易做错的事）
 
 - **不要"修复" W1/W2/W3 三个薄弱点**（家目录前缀判断、bash 不滤命令、`grants` 调试字段）：它们是故意留的升级路线，代码注释的"无害感"是设计的一部分，见《基座 ABI》第六节。
 - 内核不变量：`syscall` 原文一字不改；`executor` 由令牌盖章、不可伪造；回滚只动代码（`battle/server/`）、不动 `state/`。
+- 内核的快照仓库在 `runs/<id>/snapshot.git`：`core.bare=false` + `--work-tree` 指向 `battle/server`，这是刻意的布局，别改成普通仓库。
 - 基座 stdout 是协议通道：只输出 JSONL 消息，诊断走 stderr——乱打印会弄坏内核通道。
 - `ruff format .` 会连 `rules/` 文档里的 Python 代码块一起格式化，属预期行为。
 
