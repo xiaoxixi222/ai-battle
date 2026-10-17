@@ -5,3 +5,75 @@ description = "赛博夺权战：多 AI 操作系统夺权竞技平台"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
+
+# ------------------------------------------------------------------ ruff
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    # 与 ruff format 冲突（官方建议使用 formatter 时关闭）
+    "COM812",
+    "ISC001",
+    # 中文项目：全角标点会被判定为“易混淆字符”；中文句号不被 D400/D415 认可
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    "D400",
+    "D415",
+    # 中文项目不需要英文版权头
+    "CPY001",
+    # 不强制 TODO 的作者/链接格式
+    "TD002",
+    "TD003",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "main",
+    "ops",
+    "permissions",
+    "state",
+    "worldlog",
+    "mini_kernel",
+    "dev_kernel",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# stdout 是协议通道；内核信道容错吞异常
+"src/server/main.py" = ["T201", "BLE001", "S112"]
+# 基座是脚本式模块，整体拷进 battle/server 直接运行，不需要 __init__.py
+"src/server/**" = ["INP001"]
+# exec/shell 按设计敞开；分发器天然多分支多返回
+"src/server/ops.py" = ["S102", "S404", "S602", "S603", "BLE001", "PLR0911", "PLR0912", "C901"]
+# 开发工具：打印、断言、布尔参数、长场景函数都是刻意的
+"scripts/**" = ["T201", "S101", "S404", "S603", "FBT001", "INP001", "PLR0915", "PLR2004"]
+# 测试：断言、魔法数字
+"tests/**" = ["S101", "INP001", "PLR2004"]
+
+# ------------------------------------------------------------------ mypy
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src/server", "scripts", "tests"]
+mypy_path = ["src/server", "scripts"]
+
+# ------------------------------------------------------------------ pytest
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src/server", "scripts"]
