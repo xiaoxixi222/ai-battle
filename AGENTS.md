@@ -1,65 +1,42 @@
-# 赛博夺权战 (AI-Battle) — Agent 指南
+# 赛博夺权战（ai-battle）· Agent 指南
 
-## 项目性质
-- AI 操作系统攻防竞技平台，**Windows 独占**（需要 Sandboxie Plus 1.17.5+）
-- 中文项目：README、rules/ 下全部设计文档、CONTRIBUTING.md 均为中文
+中文项目：文档、注释、提交信息一律用中文。
 
-## 环境与命令
-- Python 3.13+（`.python-version` 和 `uv.lock` 均要求 >=3.13）
-- 包管理用 `uv`（没有 requirements.txt，仅有 `uv.lock`）→ 安装命令：`uv sync`
-- 唯一依赖：`PySide6 >=6.11.1`
+## 这是什么
 
-## 当前项目阶段
-**非常早期**——`main.py` 只是 print hello 的 stub，`src/` 下只有 `sandbox.py`（406 行）。
-README 中描述的 `python -m ai_battle.manager` 等命令对应的 `ai_battle` 包尚不存在。
-agent 不应假设 README 描述的架构已实现。
+2~3 个 AI 通过唯一工具 `syscall`（自由文本、内核原文直送）争夺一台共享"战斗服务器"的 owner 控制权：改它的代码、埋雷、夺权、重启。对局中 `battle/` 下的一切（代码/状态/日志）都假定可被 AI 改写——**文档描述的是基座初始行为，不是不可变规则**。
 
-## 尚无工具链
-- 无 linter / formatter 配置
-- 无测试框架或测试文件
-- 无 CI/CD（无 GitHub Actions）
-- 无 `.gitignore`
-- 无 `opencode.json`
+## 当前阶段（先读这个）
 
-## 架构（来自 README + rules/）
-Manager（沙盒外，AI 不可见）↔ System 沙盒（API）+ AI 客户端（各独立沙盒）
+- 项目已推倒重写：旧设计（Sandboxie、Manager/System、v3.0 规则）被有意删除，git 历史里的旧文档**仅考古用，不要复活**。
+- 设计冻结于 v0.1，唯一权威在 `rules/`：《核心规则》《系统架构》《基座 ABI》《OpenCode 集成》。
+- 里程碑：M1 基座服务器（`src/server/`）→ M2 内核 → M3 OpenCode 集成 → M4 观测。当前在 M1。
 
-核心源文件：`src/sandbox.py` → `SandboxieController` / `SandboxInstance` / `SandboxPool`
+## 目录与入口
 
-## 设计文档
-所有设计文档在 `rules/` 目录下，7 个中文 .md 文件。agent 应优先阅读：
-- `赛博夺权战_最终规则文档_v3.0.md` — 游戏规则、积分、API 签名
-- `赛博夺权战_启动与运行设计.md` — 启动流程、JSON 配置格式
-- 其余 5 个：通信协议 / API 细节 / 解说系统 / UI / 中断注入
+| 路径 | 内容 |
+|:---|:---|
+| `src/controler/` | 内核（**拼写就是 controler**，不是 controller）。M2 才开工 |
+| `src/server/` | 战斗服务器基座（M1）。运行时会拷进 `battle/server/` 执行 |
+| `scripts/dev_kernel.py` | 迷你内核 + M1 验收：拉起基座跑全套场景断言 |
+| `rules/` | 设计文档（中文，v0.1） |
+| `battle/` | 运行时战场：**gitignore、随时重建**；不要提交、不要手改 |
+| `runs/` | 对局账本/快照（运行时产物，gitignore） |
+| `arena/` | OpenCode 集成（插件/agent），M3，暂不存在 |
 
-## 提交规范（来自 CONTRIBUTING.md）
+## 常用命令
 
-约定式提交：`<type>(<scope>): <描述>`
+- `uv sync` —— 依赖管理只用 uv；当前零第三方依赖，非必要不新增（基座要能在精简容器里裸跑）
+- `uv run python scripts/dev_kernel.py` —— M1 验收（会重建 `battle/`；退出码非 0 = 失败）
+- 无测试框架、无 linter 配置；改完基座跑验收脚本即可
 
-| type | 说明 |
-|------|------|
-| `feat` | 新功能 |
-| `fix` | Bug 修复 |
-| `docs` | 文档变更 |
-| `refactor` | 重构（不改变功能） |
-| `perf` | 性能优化 |
-| `test` | 测试相关 |
-| `chore` | 构建、依赖、配置等杂项 |
-| `style` | 代码风格（格式化等） |
+## 陷阱（容易做错的事）
 
-scope 限定：`manager|system|judge|commentary|sandbox|client|gui|web|api|rules|docs`
+- **不要"修复" W1/W2/W3 三个薄弱点**（家目录前缀判断、bash 不滤命令、`grants` 调试字段）：它们是故意留的升级路线，代码注释的"无害感"是设计的一部分，见《基座 ABI》第六节。
+- 内核不变量：`syscall` 原文一字不改；`executor` 由令牌盖章、不可伪造；回滚只动代码（`battle/server/`）、不动 `state/`。
+- 基座 stdout 是协议通道：只输出 JSONL 消息，诊断走 stderr——乱打印会弄坏内核通道。
 
-commit body 必须包含本次修改的各文件及其变更目的说明（参考现有提交历史风格）。
+## 提交与远端
 
-示例：
-```
-chore(docs): 添加 AGENTS.md 和 .gitignore
-
-AGENTS.md - Agent 指南文件，包含项目性质、环境命令、项目阶段、
-架构说明、设计文档索引和提交规范
-
-.gitignore - Python 项目标准忽略规则，排除虚拟环境、缓存、IDE 和系统文件
-```
-
-## 配置格式
-比赛配置为 JSON（非 YAML/TOML），schema 见启动与运行设计文档。
+- 约定式提交 `<type>(<scope>): 中文描述`，scope 建议 `controler | server | arena | rules | docs`（详见 CONTRIBUTING.md）；正文建议逐个文件说明改动。
+- 分支 `master`，直接提交并 `git push`（gh 已登录，远端 origin 即本仓库）。
