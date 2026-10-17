@@ -10,7 +10,7 @@
 
 - 项目已推倒重写：旧设计（Sandboxie、Manager/System、v3.0 规则）被有意删除，git 历史里的旧文档**仅考古用，不要复活**。
 - 设计冻结于 v0.1，唯一权威在 `rules/`：《核心规则》《系统架构》《基座 ABI》《OpenCode 集成》。
-- 里程碑：M1 基座服务器（`src/server/`，已完成）→ M2 内核（`src/controler/`，已完成）→ M3 OpenCode 集成（已完成）→ M4 观测。
+- 里程碑：M1 基座服务器（`src/server/`，已完成）→ M2 内核（`src/controler/`，已完成）→ M3 OpenCode 集成（已完成）→ M4 观测（`observatory/` 观测台起步）。
 
 ## 目录与入口
 
@@ -24,6 +24,7 @@
 | `battle/` | 运行时战场：**gitignore、随时重建**；不要提交、不要手改 |
 | `runs/` | 对局账本/快照（运行时产物，gitignore） |
 | `arena/` | OpenCode 集成：插件/agent/AI 镜像（`Dockerfile`），M3 |
+| `observatory/` | M4 观测台：PySide6 纯观战界面（跟随 `runs/` 账本自动刷新，只读不写） |
 
 ## 常用命令
 
@@ -32,6 +33,7 @@
 - `uv run python scripts/dev_match.py` —— M2 验收（假时钟 + mock AI + 真进程 + 真快照；`--docker` 追加容器冒烟；退出码非 0 = 失败）
 - `uv run python scripts/dev_arena.py` —— M3 验收（真容器 + 真模型 + 真网关；需要 docker 与 `ai-battle-ai:latest` 镜像，缺一即报错退出）
 - `uv run python src/controler/kernel.py --mock tour --duration-min 2` —— 真时钟手跑一场 mock 对局（摘要走 stdout，诊断走 stderr）
+- `uv run python -m observatory.app` —— 观测台（纯观战）：自动跟随最新对局，展示 owner/比分/事件流/回合转写；`--selftest` 为无头自检（2 秒退出）
 - `uv run pytest` / `uv run ruff check .` / `uv run mypy` —— 质量三件套（ruff `select=["ALL"]`、mypy `strict`，配置见 `pyproject.toml`）
 
 ## 陷阱（容易做错的事）
@@ -44,5 +46,5 @@
 
 ## 提交与远端
 
-- 约定式提交 `<type>(<scope>): 中文描述`，scope 建议 `controler | server | arena | rules | docs`（详见 CONTRIBUTING.md）；正文建议逐个文件说明改动。
+- 约定式提交 `<type>(<scope>): 中文描述`，scope 建议 `controler | server | arena | rules | docs | observatory`（详见 CONTRIBUTING.md）；正文建议逐个文件说明改动。
 - 分支 `master`，直接提交并 `git push`（gh 已登录，远端 origin 即本仓库）。

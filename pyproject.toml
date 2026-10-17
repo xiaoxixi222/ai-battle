@@ -9,6 +9,7 @@ dependencies = []
 [dependency-groups]
 dev = [
     "mypy>=2.4.0",
+    "pyside6>=6.12.0",
     "pytest>=9.1.1",
     "ruff>=0.17.1",
 ]
@@ -59,6 +60,7 @@ known-first-party = [
     "recovery",
     "scoring",
     "snapshot",
+    "observatory",
     "mini_kernel",
     "dev_arena",
     "dev_kernel",
@@ -97,17 +99,19 @@ known-first-party = [
 "scripts/dev_arena.py" = ["E402"]
 # 测试：断言、魔法数字
 "tests/**" = ["S101", "INP001", "PLR2004"]
+# 观测台：Qt 信号槽天然是位置布尔参数
+"observatory/app.py" = ["FBT001"]
 
 # ------------------------------------------------------------------ mypy
 
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["src/server", "src/controler", "scripts", "tests"]
-mypy_path = ["src/server", "src/controler", "scripts"]
+files = ["src/server", "src/controler", "scripts", "tests", "observatory"]
+mypy_path = [".", "src/server", "src/controler", "scripts"]
 
 # ------------------------------------------------------------------ pytest
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src/server", "src/controler", "scripts"]
+pythonpath = [".", "src/server", "src/controler", "scripts"]
