@@ -48,8 +48,19 @@ known-first-party = [
     "permissions",
     "state",
     "worldlog",
+    "battlelink",
+    "gateway",
+    "kernel",
+    "ledger",
+    "matchconfig",
+    "mockai",
+    "orchestrator",
+    "recovery",
+    "scoring",
+    "snapshot",
     "mini_kernel",
     "dev_kernel",
+    "dev_match",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -59,8 +70,27 @@ known-first-party = [
 "src/server/**" = ["INP001"]
 # exec/shell 按设计敞开；分发器天然多分支多返回
 "src/server/ops.py" = ["S102", "S404", "S602", "S603", "BLE001", "PLR0911", "PLR0912", "C901"]
-# 开发工具：打印、断言、布尔参数、长场景函数都是刻意的
-"scripts/**" = ["T201", "S101", "S404", "S603", "FBT001", "INP001", "PLR0915", "PLR2004"]
+# 内核也是脚本式模块：subprocess 拉起服务器 / git / docker 是本职工作
+"src/controler/**" = ["INP001", "S404", "S603", "S607", "PLR0913"]
+# 内核 CLI 要打摘要
+"src/controler/kernel.py" = ["T201"]
+# 开发工具：打印、断言、布尔参数、长场景函数和宽签名都是刻意的
+"scripts/**" = [
+    "T201",
+    "S101",
+    "S404",
+    "S603",
+    "FBT001",
+    "INP001",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+    "ANN401",
+    "C901",
+    "RUF059",
+]
+# dev_match 先做 sys.path 接线再导入内核模块
+"scripts/dev_match.py" = ["E402"]
 # 测试：断言、魔法数字
 "tests/**" = ["S101", "INP001", "PLR2004"]
 
@@ -69,11 +99,11 @@ known-first-party = [
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["src/server", "scripts", "tests"]
-mypy_path = ["src/server", "scripts"]
+files = ["src/server", "src/controler", "scripts", "tests"]
+mypy_path = ["src/server", "src/controler", "scripts"]
 
 # ------------------------------------------------------------------ pytest
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src/server", "scripts"]
+pythonpath = ["src/server", "src/controler", "scripts"]
