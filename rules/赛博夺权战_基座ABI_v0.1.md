@@ -115,8 +115,10 @@
 
 ```python
 def level_of(server, uid):
-    if uid == server.owner: return 3
+    if uid == server.owner:
+        return 3
     return server.rights.get(uid, 0)
+
 
 # L0 的家目录检查（就是它，只做字符串前缀匹配）
 def in_own_home(server, uid, path):

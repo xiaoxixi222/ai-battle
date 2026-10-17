@@ -108,7 +108,14 @@ docs: 更新 README 安装步骤
 - **文件编码**：使用 UTF-8
 - **导入顺序**：标准库 → 第三方库 → 项目内部模块，每组之间空一行
 
-目前项目未强制使用 linter，但建议你在提交前使用 `ruff` 或 `flake8` 检查。
+提交前请跑一遍质量三件套（`ruff` 为 `select = ["ALL"]`、`mypy` 为 `strict`，配置见 `pyproject.toml`）：
+
+```bash
+uv run ruff check .    # lint
+uv run ruff format .   # 格式化
+uv run mypy            # 类型检查
+uv run pytest          # 测试
+```
 
 ---
 

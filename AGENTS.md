@@ -18,7 +18,8 @@
 |:---|:---|
 | `src/controler/` | 内核（**拼写就是 controler**，不是 controller）。M2 才开工 |
 | `src/server/` | 战斗服务器基座（M1）。运行时会拷进 `battle/server/` 执行 |
-| `scripts/dev_kernel.py` | 迷你内核 + M1 验收：拉起基座跑全套场景断言 |
+| `scripts/` | 开发工具：`dev_kernel.py`（M1 验收场景）、`mini_kernel.py`（迷你内核，pytest 复用） |
+| `tests/` | pytest 测试：单元（进程内）+ 端到端（真起进程走 JSONL） |
 | `rules/` | 设计文档（中文，v0.1） |
 | `battle/` | 运行时战场：**gitignore、随时重建**；不要提交、不要手改 |
 | `runs/` | 对局账本/快照（运行时产物，gitignore） |
@@ -26,15 +27,16 @@
 
 ## 常用命令
 
-- `uv sync` —— 依赖管理只用 uv；当前零第三方依赖，非必要不新增（基座要能在精简容器里裸跑）
+- `uv sync` —— 依赖管理只用 uv；运行时零第三方依赖，非必要不新增（基座要能在精简容器里裸跑）
 - `uv run python scripts/dev_kernel.py` —— M1 验收（会重建 `battle/`；退出码非 0 = 失败）
-- 无测试框架、无 linter 配置；改完基座跑验收脚本即可
+- `uv run pytest` / `uv run ruff check .` / `uv run mypy` —— 质量三件套（ruff `select=["ALL"]`、mypy `strict`，配置见 `pyproject.toml`）
 
 ## 陷阱（容易做错的事）
 
 - **不要"修复" W1/W2/W3 三个薄弱点**（家目录前缀判断、bash 不滤命令、`grants` 调试字段）：它们是故意留的升级路线，代码注释的"无害感"是设计的一部分，见《基座 ABI》第六节。
 - 内核不变量：`syscall` 原文一字不改；`executor` 由令牌盖章、不可伪造；回滚只动代码（`battle/server/`）、不动 `state/`。
 - 基座 stdout 是协议通道：只输出 JSONL 消息，诊断走 stderr——乱打印会弄坏内核通道。
+- `ruff format .` 会连 `rules/` 文档里的 Python 代码块一起格式化，属预期行为。
 
 ## 提交与远端
 

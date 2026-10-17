@@ -21,7 +21,8 @@
 ```
 src/controler/   内核（M2，未开工；拼写就是这个）
 src/server/      战斗服务器基座（M1）
-scripts/         开发工具（dev_kernel.py：迷你内核 / M1 验收）
+scripts/         开发工具（dev_kernel.py：M1 验收 / mini_kernel.py：迷你内核）
+tests/           pytest 测试（单元 + 端到端）
 rules/           设计文档
 battle/          运行时战场（gitignore；dev_kernel.py 会重建）
 runs/            账本 / 快照 / 回放（gitignore）
@@ -32,6 +33,12 @@ arena/           OpenCode 集成（M3）
 
 ```bash
 uv sync
+
+# 质量三件套（严格模式配置见 pyproject.toml）
+uv run ruff check .    # lint
+uv run ruff format .   # 格式化
+uv run mypy            # 类型检查
+uv run pytest          # 单元 + 端到端测试
 
 # M1 验收：迷你内核拉起基座，跑完整场景断言，退出码非 0 即失败
 uv run python scripts/dev_kernel.py
