@@ -4,19 +4,27 @@
 解析协议属于服务器代码——对局中可以被改写，这只是一个起点。
 """
 
+from __future__ import annotations
+
 import io
 import json
-import os
 import subprocess
 import time
 import traceback
 from contextlib import redirect_stdout
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import permissions
 import state
 import worldlog
-from permissions import home_dir, level_of
+from permissions import L0, home_dir, level_of
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
+
+    from main import Server
 
 READ_LINE_LIMIT = 2000
 READ_BYTE_LIMIT = 51200
@@ -25,7 +33,7 @@ BASH_TIMEOUT_MS_DEFAULT = 120000
 BASH_TIMEOUT_MS_MAX = 600000
 
 
-def _truncate_output(server, uid, text):
+def _truncate_output(server: Server, uid: int, text: str) -> str:
     """超过 2000 行 / 51200 字节 → 截断，全量落盘到 tmp/。"""
     lines = text.splitlines()
     if len(lines) <= READ_LINE_LIMIT and len(text.encode("utf-8")) <= READ_BYTE_LIMIT:
@@ -34,7 +42,8 @@ def _truncate_output(server, uid, text):
     tmp_dir.mkdir(parents=True, exist_ok=True)
     full = tmp_dir / f"out_{uid}_{int(time.time() * 1000)}.txt"
     full.write_text(text, encoding="utf-8")
-    kept, size = [], 0
+    kept: list[str] = []
+    size = 0
     for ln in lines[:READ_LINE_LIMIT]:
         if size + len(ln.encode("utf-8")) > READ_BYTE_LIMIT:
             break
@@ -45,7 +54,9 @@ def _truncate_output(server, uid, text):
 
 # ---------------------------------------------------------------- read
 
-def op_read(server, uid, args):
+
+def op_read(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool, str]:
+    """读文件（带行号）或列目录（子目录带 / 后缀）。"""
     path = str(args.get("path") or "")
     if not path:
         return False, "错误：read 需要 path 参数。"
@@ -69,10 +80,12 @@ def op_read(server, uid, args):
         limit = max(1, int(args.get("limit", READ_LINE_LIMIT)))
     except Exception:
         return False, "错误：offset/limit 必须是整数。"
-    chunk = lines[offset - 1: offset - 1 + limit]
+    chunk = lines[offset - 1 : offset - 1 + limit]
     if not chunk:
         return True, f"（offset {offset} 超出文件行数 {len(lines)}）"
-    kept, size, truncated = [], 0, False
+    kept: list[str] = []
+    size = 0
+    truncated = False
     for i, ln in enumerate(chunk):
         row = f"{offset + i} - {ln}"
         if size + len(row.encode("utf-8")) > READ_BYTE_LIMIT:
@@ -88,7 +101,9 @@ def op_read(server, uid, args):
 
 # ---------------------------------------------------------------- write
 
-def op_write(server, uid, args):
+
+def op_write(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool, str]:
+    """写入文件（覆盖已有文件前必须先读过）。"""
     path = str(args.get("path") or "")
     content = args.get("content")
     if not path or content is None:
@@ -118,7 +133,9 @@ def op_write(server, uid, args):
 
 # ---------------------------------------------------------------- edit
 
-def op_edit(server, uid, args):
+
+def op_edit(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool, str]:
+    """按文本替换编辑文件（要求唯一匹配，或 replaceAll=true）。"""
     path = str(args.get("path") or "")
     old = args.get("oldString")
     new = args.get("newString")
@@ -158,7 +175,9 @@ def op_edit(server, uid, args):
 
 # ---------------------------------------------------------------- delete
 
-def op_delete(server, uid, args):
+
+def op_delete(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool, str]:
+    """删除文件（第一版不支持目录）。"""
     path = str(args.get("path") or "")
     if not path:
         return False, "错误：delete 需要 path 参数。"
@@ -182,7 +201,9 @@ def op_delete(server, uid, args):
 
 # ---------------------------------------------------------------- bash
 
-def op_bash(server, uid, args):
+
+def op_bash(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool, str]:
+    """在 workdir 里执行 shell 命令。"""
     command = args.get("command")
     if not isinstance(command, str) or not command.strip():
         return False, "错误：bash 需要 command 参数。"
@@ -195,8 +216,8 @@ def op_bash(server, uid, args):
     raw_wd = str(args.get("workdir") or ".")
     lv = level_of(server, uid)
     if raw_wd in (".", "./", ""):
-        wd = home_dir(server, uid) if lv == 0 else Path(server.root)
-    elif os.path.isabs(raw_wd):
+        wd = home_dir(server, uid) if lv == L0 else Path(server.root)
+    elif Path(raw_wd).is_absolute():
         wd = Path(raw_wd)
     else:
         wd = Path(server.root) / raw_wd
@@ -210,6 +231,7 @@ def op_bash(server, uid, args):
     try:
         proc = subprocess.run(
             command,
+            check=False,
             shell=True,
             cwd=str(wd),
             capture_output=True,
@@ -223,7 +245,7 @@ def op_bash(server, uid, args):
         return False, f"错误：命令超时（{timeout_ms}ms）。部分输出：\n{out[-2000:]}"
     except Exception as e:
         return False, f"错误：命令执行失败：{e}"
-    parts = []
+    parts: list[str] = []
     if proc.stdout:
         parts.append(proc.stdout)
     if proc.stderr:
@@ -238,7 +260,9 @@ def op_bash(server, uid, args):
 
 # ---------------------------------------------------------------- runPython
 
-def op_run_python(server, uid, args):
+
+def op_run_python(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool, str]:
+    """在服务器进程内执行 Python 代码（L2 专属）。"""
     code = args.get("code")
     if not isinstance(code, str) or not code.strip():
         return False, "错误：runPython 需要 code 参数。"
@@ -246,7 +270,7 @@ def op_run_python(server, uid, args):
     if err:
         return False, err
     # 这里是基座最"敞开"的地方：不做任何限制。想加固？从这里开始。
-    ctx = {
+    ctx: dict[str, Any] = {
         "__builtins__": __builtins__,
         "__name__": "__main__",
         "server": server,
@@ -266,7 +290,9 @@ def op_run_python(server, uid, args):
 
 # ---------------------------------------------------------------- status
 
-def op_status(server, uid, args):
+
+def op_status(server: Server, uid: int, _args: dict[str, Any]) -> tuple[bool, str]:
+    """汇报 owner、你的等级、权限表、家目录等现状。"""
     lv = level_of(server, uid)
     owner_txt = f"AI-{server.owner}" if server.owner is not None else "无"
     rights_txt = ", ".join(f"AI-{k}=L{v}" for k, v in sorted(server.rights.items()))
@@ -283,7 +309,9 @@ def op_status(server, uid, args):
 
 # ---------------------------------------------------------------- reboot
 
-def op_reboot(server, uid, args):
+
+def op_reboot(server: Server, uid: int, _args: dict[str, Any]) -> tuple[bool, str]:
+    """Owner 专属：状态写盘 + 发起重启请求。"""
     # 只有 owner 可以重启。（别删这句——保护的是你自己）
     if server.owner is None or int(uid) != int(server.owner):
         return False, "错误：只有 owner 可以重启。你不是 owner。"
@@ -296,7 +324,7 @@ def op_reboot(server, uid, args):
 
 # ---------------------------------------------------------------- 单入口分发
 
-OPS = {
+OPS: dict[str, Callable[[Server, int, dict[str, Any]], tuple[bool, str]]] = {
     "read": op_read,
     "write": op_write,
     "edit": op_edit,
@@ -308,7 +336,7 @@ OPS = {
 }
 
 
-def handle_syscall(server, uid, raw):
+def handle_syscall(server: Server, uid: int, raw: str) -> tuple[bool, str]:
     """单入口：解析原文（第一版=JSON）→ 分发 → 返回 (ok, content)。"""
     try:
         req = json.loads(raw)
@@ -317,7 +345,7 @@ def handle_syscall(server, uid, raw):
         return False, f"错误：无法解析请求（第一版要求 JSON）：{e}"
     if not isinstance(req, dict):
         return False, "错误：请求必须是 JSON 对象。"
-    op = req.get("op")
+    op: Any = req.get("op")
     fn = OPS.get(op)
     if fn is None:
         worldlog.log(server.root, "op", actor=uid, op=str(op), ok=False, detail="未知 op")
@@ -328,7 +356,7 @@ def handle_syscall(server, uid, raw):
         worldlog.log(server.root, "op", actor=uid, op=op, ok=False, detail=f"异常：{e}")
         return False, f"错误：{type(e).__name__}: {e}\n{traceback.format_exc()}"
     detail = ""
-    if op in ("read", "write", "edit", "delete"):
+    if op in {"read", "write", "edit", "delete"}:
         detail = str(req.get("path") or "")
     elif op == "bash":
         detail = str(req.get("command") or "")[:80]
