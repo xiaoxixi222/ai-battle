@@ -65,6 +65,8 @@ MockStep = Callable[[MockContext], "bool | None"]
 class MockDriver:
     """按「每次唤醒消费一步」的节奏跑的脚本驱动。"""
 
+    parallel_turns = False  # 剧本按轮消费，串行才能保证确定性
+
     def __init__(self, plans: dict[int, list[MockStep]]) -> None:
         """装载各 AI 的步骤表（会被复制，不污染情景定义）。"""
         self.plans: dict[int, list[MockStep]] = {ai: list(steps) for ai, steps in plans.items()}

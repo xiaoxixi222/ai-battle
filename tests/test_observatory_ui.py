@@ -86,10 +86,73 @@ def test_window_follows_newest_match(tmp_path: Path) -> None:
         assert "syscall" in feed
         assert "占领服务器" in feed
         assert "门未开" not in feed
-        assert window.tabs.count() == 2
-        view = window.tabs.widget(0)
+        assert window.tabs.count() == 3  # 直播 + AI-1 + AI-2
+        assert window.tabs.tabText(0) == "直播"
+        view = window.tabs.widget(1)
         assert isinstance(view, QPlainTextEdit)
         assert "使用工具" in view.toPlainText()
-        assert "第 1 回合 · 侦察" in window.tabs.tabText(0)
+        assert "第 1 回合 · 侦察" in window.tabs.tabText(1)
+    finally:
+        window.close()
+
+
+def test_live_tab_shows_running_turn(tmp_path: Path) -> None:
+    """直播页：wake_start 标记谁在跑，直播文件的尾巴实时上屏。"""
+    _write_ledger(
+        tmp_path / "m-run",
+        [
+            {"t": "2026-01-01 12:00:00", "rel": 1.0, "event": "match_start", "ai_ids": [1, 2]},
+            {
+                "t": "2026-01-01 12:00:31",
+                "rel": 31.0,
+                "event": "wake_start",
+                "ai": 2,
+                "kind": "scout",
+                "limit": 240.0,
+            },
+        ],
+    )
+    live = tmp_path / "m-run" / "live"
+    live.mkdir(parents=True)
+    (live / "ai-2.txt").write_text(
+        "# AI-2 · scout · 开播 12:00:31 · 限时 240s\n正在研究 server/ 的代码\n", encoding="utf-8"
+    )
+    window = MainWindow(tmp_path, refresh_ms=600_000)
+    try:
+        window.refresh()
+        assert window.tabs.count() == 3
+        assert window.tabs.tabText(0) == "● 直播"
+        assert window.live_label is not None
+        assert "AI-2" in window.live_label.text()
+        assert window.live_view is not None
+        assert "正在研究" in window.live_view.toPlainText()
+        assert "240s" in window.live_view.toPlainText()
+    finally:
+        window.close()
+
+
+def test_delete_selected_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """多选删除：确认后 runs/<id>/ 连同界面档案一起消失。"""
+    _write_ledger(
+        tmp_path / "m-a",
+        [
+            {"t": "2026-01-01 10:00:00", "rel": 1.0, "event": "match_start", "ai_ids": [1]},
+            {"t": "2026-01-01 10:00:09", "rel": 9.0, "event": "end", "reason": "time_up"},
+        ],
+    )
+    _write_ledger(
+        tmp_path / "m-b",
+        [{"t": "2026-01-01 11:00:00", "rel": 1.0, "event": "match_start", "ai_ids": [1]}],
+    )
+    window = MainWindow(tmp_path, refresh_ms=600_000)
+    try:
+        window.refresh()
+        assert (tmp_path / "m-a").is_dir()
+        assert (tmp_path / "m-b").is_dir()
+        monkeypatch.setattr(window, "_ask_delete_confirmation", lambda _infos, _risky: True)
+        window._confirm_delete(["m-a", "m-b"])  # noqa: SLF001
+        assert not (tmp_path / "m-a").exists()
+        assert not (tmp_path / "m-b").exists()
+        assert window.match_list.count() == 0
     finally:
         window.close()

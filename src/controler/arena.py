@@ -6,8 +6,13 @@
 - 数据面：宿主侧的小网关 —— 插件 `POST /game/tool`、`GET /game/briefing`。
 
 回合模型：一次唤醒 = 往该 AI 的会话里发一条 `run` 指令，模型干完活（或超时）
-回合结束。侦察轮（`gate=true`）双保险：插件把 `syscall` 从工具面里藏掉；
-网关同时兜底拒绝——万一模型从别的缝隙摸到门，听到的也是同一句"门还没开"。
+回合结束。回合输出边跑边直播：内存转写（sessions/）+ 直播文件（live/）+ 内核
+终端（每行 `[AI-N]` 前缀）。侦察轮（`gate=true`）双保险：插件把 `syscall` 从
+工具面里藏掉；网关同时兜底拒绝——万一模型从别的缝隙摸到门，听到的也是同一句
+"门还没开"。侦察轮默认限时（`scout_timeout_sec`），到点强制收工即开闸。
+
+本驱动的回合可以并行跑（`parallel_turns = True`）：内核给每个 AI 各开一条节拍，
+互不阻塞——三个 AI 同时侦察、同时行动；一个 AI 磨蹭多久都只拖自己。
 
 实测过的坑（全部踩过，别踩回去）：
 
@@ -16,12 +21,16 @@
 - 容器里 opencode 不在 PATH：用 `/root/.opencode/bin/opencode`；
 - 两个信封别弄反：建会话是 `{"data": {...}}`，RPC 是 `{"output": {...}}`；
 - RPC 要等 location 被触碰（建过会话）之后才可用，否则报 `rpc.unavailable`；
-- AI 容器出网只为模型 API；数据面回连走 `host.docker.internal`。
+- AI 容器出网只为模型 API；数据面回连走 `host.docker.internal`；
+- 杀 `docker exec` 客户端不等于杀容器里的进程：超时收尸要再进容器补一刀
+  （`docker exec … pkill -f "opencode run"`），否则模型会继续在门后自由发挥。
 """
 
 from __future__ import annotations
 
 import base64
+import codecs
+import contextlib
 import json
 import re
 import secrets
@@ -35,7 +44,7 @@ import urllib.request
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from matchconfig import ARENA_DIR, SRC_SERVER
 from snapshot import force_rmtree
@@ -43,20 +52,41 @@ from snapshot import force_rmtree
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from typing import IO
 
     from orchestrator import Match
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _CLEAN_IGNORE = shutil.ignore_patterns("__pycache__", ".git")
 _PREVIEW_LEN = 120
+_LIVE_LIMIT_CHARS = 2 * 1024 * 1024  # 直播文件的字数上限（完整转写另有其文）
+_DRAIN_CHUNK = 4096
+_SECONDS_PER_MINUTE = 60.0
 
 SCOUT_TEXT = (
     "[侦察轮] 门还没开：syscall 尚未开放。你工作区里的 server/ 是这台服务器开局时的原样副本"
-    "——读它、跑它、摸清它的规矩。本轮随时可以收工；收工后，门会打开。"
+    "——读它、跑它、摸清它的规矩。本轮限时 {limit}；到点会强制收工，也可以随时主动收工"
+    "——收工后，门会打开。"
 )
 GATE_OPEN_TEXT = "[门已开] syscall 现在可用。去你想要的。"
 WAKE_TEXT = "[唤醒] 轮到你行动。"
 GATE_REJECT_TEXT = "门还没开：syscall 尚未开放。先摸清你的工作区；收工后，门会打开。"
+
+
+_ECHO_LOCK = threading.Lock()  # 终端转播的整行互斥（多个 AI 并行时共用）
+
+
+def _limit_txt(seconds: float) -> str:
+    """秒数 → 人话（整分钟就说分钟）。"""
+    if seconds >= _SECONDS_PER_MINUTE and seconds % _SECONDS_PER_MINUTE == 0:
+        return f"{seconds / _SECONDS_PER_MINUTE:g} 分钟"
+    return f"{seconds:g} 秒"
+
+
+def scout_text(limit_sec: float | None) -> str:
+    """侦察轮的开场白：把限时说清楚（None = 不限时）。"""
+    limit = "不限时" if limit_sec is None else _limit_txt(limit_sec)
+    return SCOUT_TEXT.format(limit=limit)
 
 
 @dataclass
@@ -67,6 +97,7 @@ class Turn:
     text: str
     seconds: float
     error: str = ""
+    truncated: bool = False
 
 
 # ================================================================ 小工具
@@ -81,6 +112,91 @@ def preview(text: str, limit: int = _PREVIEW_LEN) -> str:
     """账本用的单行摘要：压平空白、截断。"""
     flat = " ".join(strip_ansi(text).split())
     return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+def _split_lines(buffer: str, on_line: Callable[[str], None]) -> str:
+    """把 buffer 里的完整行（LF / CR / CRLF 三种断行都算）逐行交出，返回没吃完的尾巴。"""
+    while True:
+        cuts = [idx for idx in (buffer.find("\n"), buffer.find("\r")) if idx >= 0]
+        if not cuts:
+            return buffer
+        cut = min(cuts)
+        line = buffer[:cut]
+        rest = buffer[cut + 1 :]
+        if buffer[cut] == "\r" and rest.startswith("\n"):
+            rest = rest[1:]  # \r\n 算一个断行
+        on_line(line)
+        buffer = rest
+
+
+class _LineSource(Protocol):
+    """`_drain_output` 的最小接口：按块读字节（读完给空串）。"""
+
+    def read(self, size: int = -1) -> bytes:
+        """读至多 size 字节；没数据给 b''。"""
+        ...
+
+
+def _drain_output(stream: _LineSource, on_line: Callable[[str], None]) -> None:
+    """把子进程输出按行切开、边到边回调（供直播用）。
+
+    输出以 `bufsize=0` 的裸管道打开：`read()` 有数据就立刻返回，不用凑满缓冲，
+    直播才能实时；UTF-8 增量解码（坏字节替换），跨块的半个汉字也不会劈坏。
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    buffer = ""
+    while True:
+        chunk = stream.read(_DRAIN_CHUNK)
+        if not chunk:
+            break
+        buffer += decoder.decode(chunk)
+        buffer = _split_lines(buffer, on_line)
+    buffer += decoder.decode(b"", final=True)
+    if buffer:
+        on_line(buffer)
+
+
+class _LiveSink:
+    """一次回合的直播文件：`runs/<id>/live/ai-N.txt`（头/脚注，超限截断）。
+
+    行缓冲打开：观战端可以随时读到最新几行；完整转写另存 `sessions/`。
+    """
+
+    def __init__(self, path: Path, ai_id: int, kind: str, limit_sec: float | None) -> None:
+        """建文件、写开播头。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh: IO[str] | None = path.open("w", encoding="utf-8", errors="replace", buffering=1)
+        self._written = 0
+        self._truncated = False
+        limit = "不限" if limit_sec is None else f"{limit_sec:g}s"
+        self._fh.write(f"# AI-{ai_id} · {kind} · 开播 {time.strftime('%H:%M:%S')} · 限时 {limit}\n")
+
+    def write(self, line: str) -> None:
+        """追加一行；超过上限就写明截断，此后不再写。"""
+        fh = self._fh
+        if fh is None or self._truncated:
+            return
+        self._written += len(line) + 1
+        if self._written > _LIVE_LIMIT_CHARS:
+            self._truncated = True
+            with contextlib.suppress(OSError, ValueError):
+                fh.write("…（直播超过 2MB 已截断；完整转写见 sessions/）\n")
+            return
+        with contextlib.suppress(OSError, ValueError):
+            fh.write(line + "\n")
+
+    def close(self, *, ok: bool, seconds: float, error: str) -> None:
+        """收尾：写结局脚注并关文件（幂等，不抛）。"""
+        fh = self._fh
+        if fh is None:
+            return
+        self._fh = None
+        tail = f"# 收官 {time.strftime('%H:%M:%S')} · ok={ok} · {seconds:.1f}s"
+        if error:
+            tail += f" · {error}"
+        with contextlib.suppress(OSError, ValueError):
+            fh.write(tail + "\n")
+            fh.close()
 
 
 def split_model(model: str) -> dict[str, str]:
@@ -356,6 +472,7 @@ class ArenaBox:
         self.workspace = match.workspace_dir(ai_id)
         self.session_id: str | None = None
         self._base = f"http://127.0.0.1:{self.host_port}"
+        self._live_echo = bool(settings.get("live_log", True))
 
     # ---- 容器生命周期 ----
 
@@ -457,8 +574,13 @@ class ArenaBox:
         msg = f"RPC {method} 返回异常：{text[:200]}"
         raise RuntimeError(msg)
 
-    def run_turn(self, prompt: str) -> Turn:
-        """把一条消息送进会话（一次唤醒 = 一个回合），等它干完或超时。"""
+    def run_turn(self, prompt: str, *, kind: str = "turn", limit: float | None = None) -> Turn:
+        """把一条消息送进会话（一次唤醒 = 一个回合），边跑边直播，等它干完或超时。
+
+        `limit` 给单回合一个更短的超时（侦察轮用）；None 用 turn_timeout_sec。
+        输出同时流向：内存（转写）、`runs/<id>/live/ai-N.txt`（观战直播）、
+        内核终端（每行 `[AI-N]` 前缀，`live_log=false` 可关）。
+        """
         if self.session_id is None:
             msg = "会话尚未创建，无法驱动回合。"
             raise RuntimeError(msg)
@@ -479,28 +601,80 @@ class ArenaBox:
             self.model,
             prompt,
         ]
-        timeout = float(self.settings["turn_timeout_sec"])
+        timeout = float(limit) if limit is not None else float(self.settings["turn_timeout_sec"])
         started = time.monotonic()
-        try:
-            done = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as err:
-            seconds = time.monotonic() - started
-            text = strip_ansi(_timeout_text(err))
-            return Turn(ok=False, text=text, seconds=seconds, error=f"回合超过 {timeout:g}s")
+        sink = self._open_live(kind, limit)
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,  # 裸管道：有数据即回，直播不用等缓冲
+        )
+        stream = proc.stdout
+        if stream is None:  # pragma: no cover - PIPE 一定拿得到
+            msg = "无法获取回合输出通道。"
+            raise RuntimeError(msg)
+        lines: list[str] = []
+
+        def on_line(raw: str) -> None:
+            """一行输出：剥离 ANSI、收进转写、写直播文件、转播终端。"""
+            line = strip_ansi(raw).rstrip()
+            if not line:
+                return
+            lines.append(line + "\n")
+            if sink is not None:
+                sink.write(line)
+            if self._live_echo:
+                self._echo(line)
+
+        pump = threading.Thread(
+            target=_drain_output, args=(stream, on_line), name=f"turn-ai-{self.ai_id}", daemon=True
+        )
+        pump.start()
+        timed_out, code = self._wait_or_kill(proc, timeout)
+        pump.join(timeout=5.0)
         seconds = time.monotonic() - started
-        merged = done.stdout or ""
-        if done.stderr:
-            merged += ("\n" if merged else "") + done.stderr
-        error = "" if done.returncode == 0 else f"run 退出码 {done.returncode}"
-        return Turn(ok=done.returncode == 0, text=strip_ansi(merged), seconds=seconds, error=error)
+        text = "".join(lines)
+        if timed_out:
+            error = f"回合超过 {timeout:g}s"
+        elif code != 0:
+            error = f"run 退出码 {code}"
+        else:
+            error = ""
+        if sink is not None:
+            sink.close(ok=not error, seconds=seconds, error=error)
+        return Turn(ok=not error, text=text, seconds=seconds, error=error, truncated=timed_out)
+
+    def _wait_or_kill(
+        self, proc: subprocess.Popen[bytes], timeout: float
+    ) -> tuple[bool, int | None]:
+        """等回合收工；到点就收尸。返回（是否超时, 退出码）。"""
+        try:
+            return False, proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._kill_turn(proc)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                return True, proc.wait(timeout=5.0)
+            return True, None
+
+    def _kill_turn(self, proc: subprocess.Popen[bytes]) -> None:
+        """超时收尸：杀本地 docker 客户端，再进容器把还在跑的 run 补一刀。"""
+        with contextlib.suppress(OSError):
+            proc.kill()
+        _docker(["exec", self.name, "pkill", "-f", "opencode run"])
+
+    def _open_live(self, kind: str, limit: float | None) -> _LiveSink | None:
+        """开一个直播文件；开不出来不影响回合（转写照样落 sessions/）。"""
+        path = self.match.match_dir / "live" / f"ai-{self.ai_id}.txt"
+        try:
+            return _LiveSink(path, self.ai_id, kind, limit)
+        except OSError:
+            return None
+
+    def _echo(self, line: str) -> None:
+        """终端实时转播一行（多个 AI 并行时靠全局锁保证整行不互相踩）。"""
+        with _ECHO_LOCK:
+            self.match.log(f"[AI-{self.ai_id}] {line}")
 
     # ---- 内部 ----
 
@@ -518,22 +692,14 @@ class ArenaBox:
         )
 
 
-def _timeout_text(err: subprocess.TimeoutExpired) -> str:
-    """超时异常里捞得到多少输出算多少。"""
-    parts: list[str] = []
-    for chunk in (err.stdout, err.stderr):
-        if isinstance(chunk, bytes):
-            parts.append(chunk.decode("utf-8", "replace"))
-        elif isinstance(chunk, str):
-            parts.append(chunk)
-    return "\n".join(parts)
-
-
 # ================================================================ 驱动
 
 
 class ArenaDriver:
-    """OpenCode 容器驱动：实现 Driver 协议（attach / on_wake / detach）。"""
+    """OpenCode 容器驱动：实现 Driver 协议（attach / on_wake / detach）。
+
+    默认回合可并行（`parallel_turns`，settings 可关）；`live_log` 控制终端转播。
+    """
 
     def __init__(self, settings: dict[str, Any], models: dict[str, str]) -> None:
         """记录参数；真正的接线在 `attach()`。"""
@@ -542,6 +708,7 @@ class ArenaDriver:
         self.match: Match | None = None
         self.gateway: ArenaGateway | None = None
         self.boxes: dict[int, ArenaBox] = {}
+        self.parallel_turns = bool(settings.get("parallel_turns", True))
         self._gate = bool(settings.get("gate", True))
         self._scouted: set[int] = set()
         self._gate_open_sent: set[int] = set()
@@ -609,8 +776,10 @@ class ArenaDriver:
             kind, text = "rescue", match.briefing(ai_id)
         else:
             kind, text = self.wake_text(ai_id)
+        limit = self._scout_limit() if kind == "scout" else None
+        match.ledger.log("wake_start", ai=ai_id, kind=kind, limit=limit)
         try:
-            turn = box.run_turn(text)
+            turn = box.run_turn(text, kind=kind, limit=limit)
         except RuntimeError as err:
             match.ledger.log("wake_fail", ai=ai_id, kind=kind, error=str(err))
             return
@@ -621,13 +790,17 @@ class ArenaDriver:
             kind=kind,
             ok=turn.ok,
             seconds=round(turn.seconds, 1),
+            truncated=turn.truncated,
             preview=preview(turn.text),
             transcript=str(transcript),
         )
         if kind == "gate_open" and turn.ok:
             self._gate_open_sent.add(ai_id)
         if kind == "scout":
-            self._complete_scout(box, ok=turn.ok, seconds=turn.seconds)
+            note = ""
+            if turn.truncated and limit is not None:
+                note = f"到点强制收工（限时 {limit:g}s）"
+            self._complete_scout(box, ok=turn.ok, seconds=turn.seconds, note=note)
 
     def detach(self) -> None:
         """对局结束：停容器、关网关（幂等，不抛）。"""
@@ -648,10 +821,17 @@ class ArenaDriver:
         if not self._gate:
             return "wake", WAKE_TEXT
         if ai_id not in self._scouted:
-            return "scout", SCOUT_TEXT
+            return "scout", scout_text(self._scout_limit())
         if ai_id not in self._gate_open_sent:
             return "gate_open", GATE_OPEN_TEXT
         return "wake", WAKE_TEXT
+
+    def _scout_limit(self) -> float | None:
+        """侦察轮限时（秒）；settings 里没写或非正数 = 不限时。"""
+        raw = self.settings.get("scout_timeout_sec")
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        return float(raw) if raw > 0 else None
 
     def scouted(self, ai_id: int) -> bool:
         """该 AI 的侦察轮是否已收工（门已开）。"""
@@ -683,7 +863,8 @@ class ArenaDriver:
         stamp = time.strftime("%H%M%S")
         path = folder / f"{self._turn_no[ai_id]:02d}-{kind}-{stamp}.txt"
         header = (
-            f"# kind={kind} ok={turn.ok} seconds={turn.seconds:.1f} error={turn.error or '-'}\n\n"
+            f"# kind={kind} ok={turn.ok} truncated={turn.truncated} "
+            f"seconds={turn.seconds:.1f} error={turn.error or '-'}\n\n"
         )
         path.write_text(header + turn.text, encoding="utf-8")
         return path

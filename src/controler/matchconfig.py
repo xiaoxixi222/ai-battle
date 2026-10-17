@@ -88,7 +88,9 @@ class MatchConfig:
     def arena_settings(self) -> dict[str, Any]:
         """arena（OpenCode 容器）驱动的合并参数（默认值 + 配置覆盖）。
 
-        gate=true 开侦察轮：插件先藏 syscall，该 AI 首回合收工后经 RPC 开闸。
+        gate=true 开侦察轮：插件先藏 syscall，该 AI 首回合收工（或到点）后经
+        RPC 开闸；parallel_turns=true 让三个 AI 的回合同时跑（互不阻塞）；
+        live_log=true 把回合输出实时转播到内核终端。
         """
         base: dict[str, Any] = {
             "image": "ai-battle-ai:latest",
@@ -101,6 +103,9 @@ class MatchConfig:
             "opencode_bin": "/root/.opencode/bin/opencode",
             "ready_timeout_sec": 90.0,
             "turn_timeout_sec": 900.0,
+            "scout_timeout_sec": 240.0,
+            "parallel_turns": True,
+            "live_log": True,
             "debug": False,
             "print_logs": False,
         }

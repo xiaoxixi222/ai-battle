@@ -7,7 +7,10 @@
 stdout 是唯一协议通道（一行一条 JSON）；stderr 全部落进
 battle/logs/server.stderr.log，不污染协议。
 
-并发假设：M2 一次只有一发 syscall 在等结果；M3 由网关层加锁串行化。
+并发假设：本类**不是**线程安全的——`_q` 与 `_inbox` 共享且无锁，两个并发
+`wait_msg` 会互相吞消息。约定：一发请求-应答（send + wait_msg）必须被外层
+串行化（内核用 Match 的链路锁）；`kill()` 是例外，它允许被随时调用，在途等待
+会以 `LinkClosedError` 收场。重启会递增代际，旧世代的等待直接作废（不误收）。
 """
 
 from __future__ import annotations
@@ -74,6 +77,7 @@ class BattleLink:
         self._log_fh: IO[str] | None = None
         self._q: queue.Queue[str | None] = queue.Queue()
         self._inbox: list[dict[str, Any]] = []
+        self._generation = 0
 
     # ---- 命令行 ----
 
@@ -140,17 +144,20 @@ class BattleLink:
             raise LinkError(msg)
         self._q = queue.Queue()
         self._inbox = []
+        self._generation += 1  # 新世代：旧世代的等待者立即作废
         threading.Thread(target=_reader, args=(self.proc.stdout, self._q), daemon=True).start()
 
     def alive(self) -> bool:
-        """进程是否还活着。"""
-        return self.proc is not None and self.proc.poll() is None
+        """进程是否还活着（无锁读，容忍与 kill/spawn 交错）。"""
+        proc = self.proc
+        return proc is not None and proc.poll() is None
 
     def returncode(self) -> int | None:
         """进程退出码（还活着时为 None）；会顺带回收退出状态。"""
-        if self.proc is None:
+        proc = self.proc
+        if proc is None:
             return None
-        return self.proc.poll()
+        return proc.poll()
 
     def kill(self) -> None:
         """杀掉服务器（崩溃模拟 / 重启的第一步 / 终局清理），幂等且不抛。
@@ -196,11 +203,16 @@ class BattleLink:
 
     def send(self, msg: dict[str, Any]) -> None:
         """向服务器 stdin 发一条协议消息（一行 JSON）。"""
-        if self._stdin is None or not self.alive():
+        stdin = self._stdin
+        if stdin is None or not self.alive():
             msg_err = "发送失败：服务器进程不可用。"
             raise LinkClosedError(msg_err)
-        self._stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
-        self._stdin.flush()
+        try:
+            stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            stdin.flush()
+        except (OSError, ValueError, AttributeError) as err:
+            msg_err = f"发送失败：通道已断（{err}）。"
+            raise LinkClosedError(msg_err) from err
 
     def _take_inbox(self, kind: str, sid: int | None) -> dict[str, Any] | None:
         """从暂存区取一条匹配的消息。"""
@@ -210,12 +222,20 @@ class BattleLink:
         return None
 
     def wait_msg(self, kind: str, sid: int | None, timeout: float) -> dict[str, Any]:
-        """等一条指定类型（可带 id）的消息；其余消息进暂存区。"""
+        """等一条指定类型（可带 id）的消息；其余消息进暂存区。
+
+        等待期间通道若被重建（服务器重启），立即放弃：新世代的礼包不能
+        错递给旧回合的等待者。
+        """
+        generation = self._generation
         msg = self._take_inbox(kind, sid)
         if msg is not None:
             return msg
         deadline = time.monotonic() + timeout
         while True:
+            if self._generation != generation:
+                msg_err = "等待中断：通道已重建。"
+                raise LinkClosedError(msg_err)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 msg_err = f"等待 {kind} 超时（{timeout}s）。"

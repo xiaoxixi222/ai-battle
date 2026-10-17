@@ -4,7 +4,10 @@
 
 - 顶部：当前 owner（醒目）、状态、比分与权限；
 - 中部：事件流（含 AI 每次 syscall 的原文与结果）；
-- 下部：每个 AI 最近一回合的完整转写（工具调用与思考原文）。
+- 下部：第 0 页「直播」看正在跑的回合（多 AI 并行时用下拉切换），
+  之后每个 AI 一页收工转写（工具调用与思考原文）。
+
+左列对局列表支持多选 + 右键删除（连 runs/<id>/ 一起删，不可逆）。
 
 对局由你在终端里跑（如 `uv run python src/controler/kernel.py --arena ...`），
 界面会自动追上最新写入的一场。
@@ -22,15 +25,20 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QTextCursor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QSplitter,
     QTabWidget,
@@ -42,11 +50,14 @@ from observatory.data import (
     LedgerTail,
     MatchInfo,
     MatchState,
+    delete_match,
     discover_matches,
     event_line,
     fmt_rel,
     kind_of,
     latest_transcript,
+    live_tail,
+    looks_ended,
     session_ai_ids,
     turn_label,
 )
@@ -59,9 +70,14 @@ WINDOW_HEIGHT = 780
 LIST_WIDTH = 240
 FEED_MAX_BLOCKS = 800
 FEED_BOTTOM_SLACK = 2
+LIVE_MAX_BLOCKS = 4000
+# 直播文件多少秒内还有新行，就当作“还在跑”（老账本没有 wake_start 时的兜底）
+LIVE_FRESH_SEC = 25.0
 FONT_FAMILY = "Consolas"
 FONT_SIZE = 10
 NO_TRANSCRIPT_TEXT = "（暂无回合文本；回合结束后会出现在这里）"
+LIVE_IDLE_TEXT = "当前没有正在进行的回合（下面保留上一回合的末尾）"
+LIVE_EMPTY_TEXT = "（还没有直播内容）"
 SEPARATOR = "　｜　"
 
 AI_COLORS = ("#4fc3f7", "#ffb74d", "#81c784", "#f06292", "#ba68c8")
@@ -95,12 +111,18 @@ class MainWindow(QMainWindow):
         self._states: dict[str, MatchState] = {}
         self._tails: dict[str, LedgerTail] = {}
         self._rendered: dict[str, int] = {}
+        self._infos: dict[str, MatchInfo] = {}
         self._item_by_id: dict[str, QListWidgetItem] = {}
         self._current = ""
         self._suppress_hook = False
         self._tab_ais: list[int] = []
         self._tabs_match = ""
         self._turn_views: dict[int, QPlainTextEdit] = {}
+        self.live_view: QPlainTextEdit | None = None
+        self.live_label: QLabel | None = None
+        self.live_combo: QComboBox | None = None
+        self._live_selected: int | None = None
+        self._live_shown = ""
         self.setWindowTitle("赛博夺权战 · 观测台")
         self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
         self._build_ui()
@@ -132,7 +154,11 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.match_list = QListWidget()
         self.match_list.setMaximumWidth(LIST_WIDTH)
+        self.match_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.match_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.match_list.setToolTip("多选（Ctrl/Shift）；右键可删除选中的对局")
         self.match_list.currentItemChanged.connect(self._on_item_changed)
+        self.match_list.customContextMenuRequested.connect(self._on_list_menu)
         splitter.addWidget(self.match_list)
 
         right = QWidget()
@@ -160,6 +186,7 @@ class MainWindow(QMainWindow):
     def refresh(self) -> None:
         """重扫 runs/：同步列表、跟进选中对局、刷新界面。"""
         matches = discover_matches(self.runs_dir)
+        self._infos = {m.match_id: m for m in matches}
         self._sync_list(matches)
         target = self._pick_target(matches)
         if target is None:
@@ -189,7 +216,9 @@ class MainWindow(QMainWindow):
         """把 runs/ 的现状同步进左列（顺序稳定，新增的置顶）。"""
         alive = {m.match_id for m in matches}
         for gone in [mid for mid in self._item_by_id if mid not in alive]:
-            self.match_list.takeItem(self.match_list.row(self._item_by_id.pop(gone)))
+            row = self.match_list.row(self._item_by_id.pop(gone))
+            if row >= 0:
+                self.match_list.takeItem(row)
         fresh = [m for m in matches if m.match_id not in self._item_by_id]
         if not self._item_by_id and fresh:  # 首轮：按序整批放入
             for match in fresh:
@@ -259,6 +288,7 @@ class MainWindow(QMainWindow):
             self._flush_feed(match.match_id, state)
         self._render_scoreboard(match, state)
         self._sync_tabs(match, state)
+        self._sync_live(match, state)
         item = self._item_by_id.get(match.match_id)
         if item is not None:
             item.setText(self._item_text(match))
@@ -336,10 +366,10 @@ class MainWindow(QMainWindow):
             )
         return SEPARATOR.join(cells) if cells else "（比分未开）"
 
-    # ------------------------------------------------------------ 回合转写
+    # ------------------------------------------------------------ 直播与转写
 
     def _sync_tabs(self, match: MatchInfo, state: MatchState) -> None:
-        """每个 AI 一个页签，展示最近一回合的完整转写。"""
+        """每个 AI 一个转写页签（第 0 页永远是直播）。"""
         ais = list(state.ai_ids) or session_ai_ids(match.dir)
         if ais != self._tab_ais or match.match_id != self._tabs_match:
             self._rebuild_tabs(match, ais)
@@ -357,9 +387,12 @@ class MainWindow(QMainWindow):
             self.tabs.setTabText(self.tabs.indexOf(view), title)
 
     def _rebuild_tabs(self, match: MatchInfo, ais: list[int]) -> None:
-        """换台后重建页签集合。"""
+        """换台后重建页签集合（先直播页，再每个 AI 一页）。"""
         self.tabs.clear()
         self._turn_views = {}
+        self._live_selected = None
+        self._live_shown = ""
+        self._build_live_tab()
         for ai in ais:
             view = QPlainTextEdit()
             view.setReadOnly(True)
@@ -369,6 +402,186 @@ class MainWindow(QMainWindow):
             self._turn_views[ai] = view
         self._tab_ais = list(ais)
         self._tabs_match = match.match_id
+
+    def _build_live_tab(self) -> None:
+        """搭直播页：一行状态（谁在跑 + 选择器）+ 一块滚动直播文本。"""
+        pane = QWidget()
+        layout = QVBoxLayout(pane)
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        self.live_label = QLabel(LIVE_EMPTY_TEXT)
+        self.live_combo = QComboBox()
+        self.live_combo.currentIndexChanged.connect(self._on_live_pick)
+        row_layout.addWidget(self.live_label, stretch=1)
+        row_layout.addWidget(self.live_combo)
+        layout.addWidget(row)
+        self.live_view = QPlainTextEdit()
+        self.live_view.setReadOnly(True)
+        self.live_view.setFont(QFont(FONT_FAMILY, FONT_SIZE))
+        self.live_view.setMaximumBlockCount(LIVE_MAX_BLOCKS)
+        self.live_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.live_view.setPlaceholderText(LIVE_EMPTY_TEXT)
+        layout.addWidget(self.live_view, stretch=1)
+        self.tabs.addTab(pane, "直播")
+
+    def _sync_live(self, match: MatchInfo, state: MatchState) -> None:
+        """刷新直播页：谁在跑（账本为准，文件新鲜度兜底）+ 选中 AI 的直播尾巴。"""
+        combo = self.live_combo
+        if combo is None:
+            return
+        ais = list(state.ai_ids) or session_ai_ids(match.dir)
+        running = sorted(ai for ai, turn in state.turns.items() if turn.get("running"))
+        now = time.time()
+        fresh: dict[int, bool] = {}
+        tails: dict[int, str] = {}
+        for ai in ais:
+            text, mtime = live_tail(match.dir, ai)
+            tails[ai] = text
+            fresh[ai] = mtime > 0 and (now - mtime) <= LIVE_FRESH_SEC and not state.ended
+        active = [ai for ai in ais if ai in running or fresh[ai]]
+        combo.blockSignals(True)  # noqa: FBT003 —— Qt 的老接口，只能位置传参
+        try:
+            combo.clear()
+            for ai in ais:
+                combo.addItem(f"AI-{ai}{' ●' if ai in active else ''}", ai)
+            if self._live_selected not in ais:
+                self._live_selected = active[-1] if active else (ais[-1] if ais else None)
+            index = combo.findData(self._live_selected)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(False)  # noqa: FBT003 —— 同上
+        self.tabs.setTabText(0, "● 直播" if active else "直播")
+        if self.live_label is not None:
+            if active:
+                who = "、".join(f"AI-{ai}" for ai in active)
+                tail = f"（本页看 AI-{self._live_selected}）" if len(active) > 1 else ""
+                self.live_label.setText(f"正在直播：{who}{tail}")
+            elif self._live_selected is not None:
+                self.live_label.setText(LIVE_IDLE_TEXT)
+            else:
+                self.live_label.setText(LIVE_EMPTY_TEXT)
+        if self._live_selected is not None:
+            self._show_live_text(tails.get(self._live_selected, ""))
+
+    def _show_live_text(self, text: str) -> None:
+        """把直播尾巴贴进直播页（守住“用户滚上去就别拉回来”）。"""
+        view = self.live_view
+        if view is None:
+            return
+        body = text or LIVE_EMPTY_TEXT
+        if body == self._live_shown:
+            return
+        self._live_shown = body
+        sb = view.verticalScrollBar()
+        at_bottom = sb.value() >= sb.maximum() - FEED_BOTTOM_SLACK
+        pos = sb.value()
+        view.setPlainText(body)
+        if at_bottom:
+            view.moveCursor(QTextCursor.MoveOperation.End)
+            sb.setValue(sb.maximum())
+        else:
+            sb.setValue(min(pos, sb.maximum()))
+
+    def _on_live_pick(self, _index: int) -> None:
+        """用户在下拉里选了别的 AI：记住选择（下一拍刷新时展示）。"""
+        combo = self.live_combo
+        if combo is None:
+            return
+        data = combo.currentData()
+        if isinstance(data, int):
+            self._live_selected = data
+
+    # ------------------------------------------------------------ 删除对局
+
+    def _on_list_menu(self, pos: QPoint) -> None:
+        """左列右键：删除选中的对局（多选有效）。"""
+        item = self.match_list.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self._suppress_hook = True
+            try:
+                self.match_list.clearSelection()
+                item.setSelected(True)
+            finally:
+                self._suppress_hook = False
+        match_ids = self._selected_ids()
+        if not match_ids:
+            return
+        menu = QMenu(self)
+        action = menu.addAction(f"删除选中的对局（{len(match_ids)} 场）…")
+        chosen = menu.exec(self.match_list.viewport().mapToGlobal(pos))
+        if chosen is action:
+            self._confirm_delete(match_ids)
+
+    def _selected_ids(self) -> list[str]:
+        """当前选中的对局 id（按列表出现顺序）。"""
+        return [
+            str(item.data(Qt.ItemDataRole.UserRole)) for item in self.match_list.selectedItems()
+        ]
+
+    def _confirm_delete(self, match_ids: list[str]) -> None:
+        """删除确认 → 执行删除 → 忘了它们的内存档；失败的报告出来。"""
+        infos = [self._infos[mid] for mid in match_ids if mid in self._infos]
+        if not infos:
+            return
+        risky: list[str] = []
+        for info in infos:
+            state = self._states.get(info.match_id)
+            ended = state.ended if state is not None else looks_ended(info.dir)
+            if ended is not True:
+                risky.append(info.match_id)
+        if not self._ask_delete_confirmation(infos, risky):
+            return
+        failed: list[str] = []
+        for info in infos:
+            try:
+                delete_match(info.dir)
+            except OSError:
+                failed.append(info.match_id)
+            else:
+                self._forget_match(info.match_id)
+        self.refresh()
+        if failed:
+            QMessageBox.warning(
+                self, "删除未完成", "这些对局没能删掉（文件可能被占用）：\n" + "、".join(failed)
+            )
+
+    def _ask_delete_confirmation(self, infos: list[MatchInfo], risky: list[str]) -> bool:
+        """弹确认框：列出对局（还在跑的给警告），返回是否点了「删除」。"""
+        lines = [f"将删除 {len(infos)} 场对局（账本、回合卷宗、直播文件一并删除）："]
+        for info in infos:
+            mark = "  ⚠ 看起来还在跑" if info.match_id in risky else ""
+            lines.append(f"　· {info.match_id}{mark}")
+        lines.append("")
+        lines.append(f"目录：{self.runs_dir}")
+        lines.append("此操作不可撤销。")
+        box = QMessageBox(self)
+        box.setWindowTitle("删除对局")
+        box.setIcon(QMessageBox.Icon.Warning if risky else QMessageBox.Icon.Question)
+        box.setText("\n".join(lines))
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        yes = box.button(QMessageBox.StandardButton.Yes)
+        if yes is not None:
+            yes.setText("删除")
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def _forget_match(self, match_id: str) -> None:
+        """清掉一场对局的界面内存档（runs/ 的删除由 delete_match 负责）。"""
+        self._states.pop(match_id, None)
+        self._tails.pop(match_id, None)
+        self._rendered.pop(match_id, None)
+        self._infos.pop(match_id, None)
+        item = self._item_by_id.pop(match_id, None)
+        if item is not None:
+            row = self.match_list.row(item)
+            if row >= 0:
+                self.match_list.takeItem(row)
+        if self._current == match_id:
+            self._current = ""
+            self._tab_ais = []
+            self._tabs_match = ""
 
     # ------------------------------------------------------------ 杂项
 

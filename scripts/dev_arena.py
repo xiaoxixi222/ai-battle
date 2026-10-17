@@ -116,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
             "debug": True,
             "print_logs": True,
             "turn_timeout_sec": args.turn_timeout,
+            "scout_timeout_sec": 600.0,
+            "live_log": False,  # 验收脚本自己看转写文件；别把模型闲聊灌满终端
         },
     )
     driver = ArenaDriver(config.arena_settings(), dict(config.models))
@@ -169,6 +171,12 @@ def main(argv: list[str] | None = None) -> int:
             "AI-1 侦察收工已记账",
             any(r["event"] == "scout_done" and r.get("ai") == 1 for r in rows),
         )
+        checks.check(
+            "侦察回合开始已记账（wake_start）",
+            any(r["event"] == "wake_start" and r.get("ai") == 1 for r in rows),
+        )
+        live = match.match_dir / "live" / "ai-1.txt"
+        checks.check("侦察直播文件落盘", live.is_file() and live.stat().st_size > 100)
         checks.check(
             "AI-1 开闸已记账", any(r["event"] == "gate_open" and r.get("ai") == 1 for r in rows)
         )

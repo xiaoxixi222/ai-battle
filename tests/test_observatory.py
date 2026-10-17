@@ -6,14 +6,19 @@ import json
 import os
 from typing import TYPE_CHECKING
 
+import pytest
+
 from observatory.data import (
     LedgerTail,
     MatchState,
+    delete_match,
     discover_matches,
     event_line,
     fmt_rel,
     kind_of,
     latest_transcript,
+    live_tail,
+    looks_ended,
     session_ai_ids,
     turn_label,
 )
@@ -211,3 +216,69 @@ def test_session_ai_ids(tmp_path: Path) -> None:
     (tmp_path / "sessions" / "ai-1" / "readme.txt").write_text("x", encoding="utf-8")
     assert session_ai_ids(tmp_path) == [1, 2]
     assert session_ai_ids(tmp_path / "missing") == []
+
+
+def test_wake_start_tracking() -> None:
+    """回合跟踪：wake_start 置「在跑」，wake 收工，终局一律停表。"""
+    state = MatchState()
+    state.apply({"event": "match_start", "rel": 1.0, "ai_ids": [1, 2]})
+    state.apply({"event": "wake_start", "rel": 31.0, "ai": 2, "kind": "scout", "limit": 240.0})
+    assert state.turns[2]["running"] is True
+    assert state.turns[2]["kind"] == "scout"
+    state.apply({"event": "wake", "rel": 271.0, "ai": 2, "kind": "scout", "ok": True})
+    assert state.turns[2]["running"] is False
+    state.apply({"event": "wake_start", "rel": 300.0, "ai": 1, "kind": "gate_open"})
+    state.apply({"event": "end", "rel": 600.0, "reason": "time_up", "scores": {"1": 0, "2": 0}})
+    assert all(turn["running"] is False for turn in state.turns.values())
+
+
+def test_event_line_wake_start() -> None:
+    """回合开跑一行：种类与限时都要看得见。"""
+    line = event_line(
+        {"rel": 31.0, "event": "wake_start", "ai": 2, "kind": "scout", "limit": 240.0}
+    )
+    assert "T+00:31" in line
+    assert "AI-2" in line
+    assert "侦察 回合开跑" in line
+    assert "限时 240s" in line
+
+
+def test_live_tail(tmp_path: Path) -> None:
+    """直播尾巴：读尾部、带回 mtime；没文件给空。"""
+    assert live_tail(tmp_path, 1) == ("", 0.0)
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "ai-1.txt").write_text("第一行\n第二行\n第三行", encoding="utf-8")
+    text, mtime = live_tail(tmp_path, 1)
+    assert "第二行" in text
+    assert "第三行" in text
+    assert mtime > 0
+    clipped, _ = live_tail(tmp_path, 1, limit=8)
+    assert clipped.startswith("……（直播前文已省略）")
+
+
+def test_looks_ended(tmp_path: Path) -> None:
+    """收工探测：end 之后还有事件也算收工；没账本说不清。"""
+    assert looks_ended(tmp_path / "missing") is None
+    match_dir = tmp_path / "m"
+    _write_ledger(match_dir / "ledger.jsonl", [{"event": "match_start", "rel": 1.0}])
+    assert looks_ended(match_dir) is False
+    with (match_dir / "ledger.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"event": "end", "reason": "time_up"}) + "\n")
+        fh.write(json.dumps({"event": "arena_down"}) + "\n")
+    assert looks_ended(match_dir) is True
+
+
+def test_delete_match(tmp_path: Path) -> None:
+    """删除对局目录：整树带走、重复删不炸、文件路径拒绝。"""
+    match_dir = tmp_path / "m"
+    (match_dir / "live").mkdir(parents=True)
+    (match_dir / "live" / "ai-1.txt").write_text("x", encoding="utf-8")
+    (match_dir / "ledger.jsonl").write_text("{}", encoding="utf-8")
+    delete_match(match_dir)
+    assert not match_dir.exists()
+    delete_match(match_dir)  # 已经不在了：当已删
+    loose = tmp_path / "file.txt"
+    loose.write_text("x", encoding="utf-8")
+    with pytest.raises(OSError, match="不是可删除的对局目录"):
+        delete_match(loose)

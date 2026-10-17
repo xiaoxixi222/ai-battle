@@ -3,15 +3,19 @@
 内核把对局的一切写进 `runs/<id>/`：
 
 - `ledger.jsonl`：一行一事件（t / rel / event 与各事件字段），观战的主数据源；
-- `sessions/ai-N/*.txt`：每个回合的完整转写（AI 的工具调用与思考原文）。
+- `sessions/ai-N/*.txt`：每个回合的完整转写（AI 的工具调用与思考原文）；
+- `live/ai-N.txt`：正在跑（或刚收工）的回合直播流，边写边读。
 
-本模块只读不写：增量跟读账本、把事件归纳成比分与 owner、格式化事件行，
-供界面直接展示。
+除了界面上的显式清理（`delete_match()` 删一整场对局的 runs 目录），全部只读。
+本模块提供：增量跟读账本、把事件归纳成比分与 owner、格式化事件行、直播尾巴、
+对局目录的发现与删除，供界面直接展示。
 """
 
 from __future__ import annotations
 
 import json
+import shutil
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -24,6 +28,8 @@ if TYPE_CHECKING:
 MAX_FEED_ROWS = 600
 # 回合转写只展示尾部这么多字符
 TRANSCRIPT_TAIL = 6000
+# 直播页每次只读直播文件尾部这么多字节
+LIVE_TAIL_BYTES = 200_000
 # 摘要里字段值的默认最大长度
 SHORT_LIMIT = 110
 # 通用摘要最多拼几个字段
@@ -208,6 +214,8 @@ class MatchState:
         self.ended = False
         self.end_reason = ""
         self.rows: deque[dict[str, object]] = deque(maxlen=MAX_FEED_ROWS)
+        # 每个 AI 最近一次行动：{"kind": str, "rel": float, "running": bool}
+        self.turns: dict[int, dict[str, object]] = {}
 
     def apply(self, row: dict[str, object]) -> None:
         """吃进一行账本：记账 + 更新状态 + 留存供展示。"""
@@ -307,11 +315,33 @@ def _apply_recovery_exit(state: MatchState, row: dict[str, object], _ai: int | N
         state.set_status("抢救失败（强制回滚）", "bad")
 
 
+def _apply_wake_start(state: MatchState, row: dict[str, object], ai: int | None) -> None:
+    """某个 AI 的回合开跑：记下类型与“正在跑”（直播页靠它判断）。"""
+    if ai is None:
+        return
+    state.turns[ai] = {
+        "kind": _as_str(row.get("kind")),
+        "rel": _as_float(row.get("rel")) or 0.0,
+        "running": True,
+    }
+
+
+def _apply_wake(state: MatchState, _row: dict[str, object], ai: int | None) -> None:
+    """某个 AI 的回合收工。"""
+    if ai is None:
+        return
+    turn = state.turns.get(ai)
+    if turn is not None:
+        turn["running"] = False
+
+
 def _apply_end(state: MatchState, row: dict[str, object], _ai: int | None) -> None:
     """终局：定格比分与 owner。"""
     state.ended = True
     state.end_reason = _as_str(row.get("reason"))
     state.set_status(f"已结束（{state.end_reason}）", "info")
+    for turn in state.turns.values():
+        turn["running"] = False
     scores = row.get("scores")
     if isinstance(scores, dict):
         for key, value in scores.items():
@@ -333,6 +363,8 @@ _HANDLERS: dict[str, Callable[[MatchState, dict[str, object], int | None], None]
     "boot_ok": _apply_boot_ok,
     "spawn": _apply_spawn,
     "recovery_exit": _apply_recovery_exit,
+    "wake_start": _apply_wake_start,
+    "wake": _apply_wake,
     "end": _apply_end,
 }
 
@@ -494,6 +526,15 @@ def _sum_wake(row: dict[str, object]) -> str:
     return f"{kind} {_short(row.get('seconds'), 10)}s｜{_short(row.get('preview'), 90)}"
 
 
+def _sum_wake_start(row: dict[str, object]) -> str:
+    """回合开跑：类型与限时。"""
+    kind_raw = _as_str(row.get("kind"))
+    kind = _WAKE_KIND_CN.get(kind_raw, kind_raw)
+    limit = _as_float(row.get("limit"))
+    tail = f"，限时 {limit:g}s" if limit is not None else ""
+    return f"{kind} 回合开跑{tail}"
+
+
 def _sum_wake_fail(row: dict[str, object]) -> str:
     """回合没跑起来。"""
     kind_raw = _as_str(row.get("kind"))
@@ -577,6 +618,7 @@ _SUMMARY_FUNCS: dict[str, Callable[[dict[str, object]], str]] = {
     "recovery_commit_fail": _sum_error,
     "end": _sum_end,
     "wake": _sum_wake,
+    "wake_start": _sum_wake_start,
     "wake_fail": _sum_wake_fail,
     "scout_done": _sum_scout_done,
     "gate_open": _sum_gate_open,
@@ -667,3 +709,99 @@ def turn_label(name: str) -> str:
             return f"{number} · {kind}"
         return number
     return stem
+
+
+# ================================================================ 直播与清理
+
+
+def live_path(match_dir: Path, ai_id: int) -> Path:
+    """某个 AI 的直播文件路径（内核边跑边写）。"""
+    return match_dir / "live" / f"ai-{ai_id}.txt"
+
+
+def live_tail(match_dir: Path, ai_id: int, limit: int = LIVE_TAIL_BYTES) -> tuple[str, float]:
+    """读直播文件的尾巴：返回（文本, mtime）；没有文件给（空串, 0.0）。
+
+    只 seek 到文件尾部读一段（直播文件可能到 2MB），够看就行。
+    """
+    path = live_path(match_dir, ai_id)
+    try:
+        size = path.stat().st_size
+        mtime = path.stat().st_mtime
+    except OSError:
+        return "", 0.0
+    read = min(size, limit)
+    try:
+        with path.open("rb") as fh:
+            fh.seek(size - read)
+            data = fh.read()
+    except OSError:
+        return "", 0.0
+    text = data.decode("utf-8", "replace")
+    if size > read:
+        text = "……（直播前文已省略）\n" + text.split("\n", 1)[-1]
+    return text, mtime
+
+
+def looks_ended(match_dir: Path, *, tail_bytes: int = 65_536, max_rows: int = 40) -> bool | None:
+    """瞄一眼对局是否收工：True 已结束 / False 看起来还在跑 / None 说不清。
+
+    只看账本尾部一小段（不做全量解析）；删除确认框靠它决定口气。
+    """
+    path = match_dir / "ledger.jsonl"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size == 0:
+        return None
+    try:
+        with path.open("rb") as fh:
+            fh.seek(max(0, size - tail_bytes))
+            data = fh.read()
+    except OSError:
+        return None
+    seen = 0
+    for raw_line in reversed(data.split(b"\n")):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line.decode("utf-8", "replace"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        seen += 1
+        if row.get("event") == "end":
+            return True
+        if seen >= max_rows:
+            break
+    return False if seen else None
+
+
+def delete_match(match_dir: Path, *, attempts: int = 6, delay: float = 0.2) -> None:
+    """删除一整场对局在 runs/ 下的目录（界面上的显式清理，唯一的写操作，不可逆）。
+
+    Windows 上文件可能被短暂占用（观战端自己的句柄、杀软、日志）：带几次重试；
+    失败抛 OSError，由界面报告。
+    """
+    target = match_dir.resolve()
+    if target.parent == target or (target.exists() and not target.is_dir()):
+        msg = f"不是可删除的对局目录：{target}"
+        raise OSError(msg)
+    if not target.exists():
+        return
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(target)
+        except FileNotFoundError:
+            return
+        except OSError:
+            if attempt == attempts - 1:
+                break
+            time.sleep(delay)
+        else:
+            return
+    msg = f"删除失败（文件可能仍被占用）：{target}"
+    raise OSError(msg)

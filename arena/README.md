@@ -77,6 +77,10 @@ uv run python src/controler/kernel.py --arena --model opencode/deepseek-v4.1-fla
 uv run python scripts/dev_arena.py        # 本机验收：真容器 + 真模型 + 真网关
 ```
 
+对局参数（都有默认值，可不用管）：`--scout-sec` 侦察轮限时（默认 240 秒，到点强制收工即
+开闸；0/负数 = 不限时）、`--no-parallel` 回合改回串行（默认并行）、`--no-live-log` 关终端
+实时转播。
+
 镜像：`docker build -t ai-battle-ai:latest arena/`。内核给每个 AI 一台容器，接线方式：
 
 | 环节 | 做法 |
@@ -85,8 +89,9 @@ uv run python scripts/dev_arena.py        # 本机验收：真容器 + 真模型
 | 容器 | `docker run -d -p 127.0.0.1:<hostport>:4096 -v <工作区>:/workspace -w /workspace -e OPENCODE_PASSWORD/BATTLE_GATEWAY_URL/BATTLE_TOKEN <镜像> /root/.opencode/bin/opencode serve --hostname 0.0.0.0 --port 4096` |
 | 数据面 | 宿主网关绑 `0.0.0.0:<随机端口>`；容器经 `http://host.docker.internal:<端口>` 回连（Docker Desktop 实测通） |
 | 会话 | `POST /api/session`（`{"agent":"game","model":{"providerID":…,"id":…}}`）→ 取服务端 id → RPC `registerSession` |
-| 回合 | `docker exec <容器> /root/.opencode/bin/opencode run --auto --server http://127.0.0.1:4096 --session <id> --agent game -m <model> "<唤醒输入>"` |
-| 门控 | 侦察轮：插件隐藏 `syscall` + 网关兜底拒收（账本 `channel=gate`）；收工后 `setPhase play` 开闸 |
+| 回合 | `docker exec <容器> /root/.opencode/bin/opencode run --auto --server http://127.0.0.1:4096 --session <id> --agent game -m <model> "<唤醒输入>"`；每个 AI 一条独立节拍、互不排队（慢的 AI 只拖慢自己） |
+| 直播 | `docker exec` 的 stdout / stderr 按行流式转播：终端 `[AI-N]` 前缀 + `runs/<id>/live/ai-N.txt`（头注限时、尾注结果；完整转写仍在 `sessions/`） |
+| 门控 | 侦察轮：插件隐藏 `syscall` + 网关兜底拒收（账本 `channel=gate`）；收工或到点（`truncated`）后 `setPhase play` 开闸 |
 
 补充坑位：容器里 `opencode` 不在 PATH（内核用全路径）；`--session` 值必须以 `ses` 开头
 （服务端 id 天然满足）；免费档模型可能把 `syscall` 经由 `game` 子代理转达——合法路径，

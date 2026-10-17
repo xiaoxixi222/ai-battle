@@ -193,7 +193,7 @@ def test_strip_and_preview() -> None:
 def test_wake_text_flow() -> None:
     """唤醒文案的状态机：侦察 → 开闸 → 常规；关掉门控就只剩常规。"""
     driver = arena.ArenaDriver({"gate": True}, {"1": "opencode/x"})
-    assert driver.wake_text(1) == ("scout", arena.SCOUT_TEXT)
+    assert driver.wake_text(1) == ("scout", arena.scout_text(None))
     driver._scouted.add(1)  # noqa: SLF001
     assert driver.wake_text(1) == ("gate_open", arena.GATE_OPEN_TEXT)
     driver._gate_open_sent.add(1)  # noqa: SLF001
@@ -203,6 +203,66 @@ def test_wake_text_flow() -> None:
     off = arena.ArenaDriver({"gate": False}, {})
     assert off.wake_text(1) == ("wake", arena.WAKE_TEXT)
     assert off.scouted(1) is False
+
+
+def test_scout_limit_text() -> None:
+    """侦察限时：开场白写清预算；settings 缺省/非正数 = 不限时。"""
+    limited = arena.ArenaDriver({"gate": True, "scout_timeout_sec": 240.0}, {})
+    kind, text = limited.wake_text(1)
+    assert kind == "scout"
+    assert "4 分钟" in text
+    assert "强制收工" in text
+    assert limited._scout_limit() == 240.0  # noqa: SLF001
+
+    odd = arena.ArenaDriver({"gate": True, "scout_timeout_sec": 90.0}, {})
+    assert "90 秒" in odd.wake_text(1)[1]
+    none = arena.ArenaDriver({"gate": True, "scout_timeout_sec": 0}, {})
+    assert none._scout_limit() is None  # noqa: SLF001
+    assert "不限时" in none.wake_text(1)[1]
+
+
+class _ChunkStream:
+    """按预设块吐数据的假输出流（模拟跨块的半个汉字）。"""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        """记下要吐的块。"""
+        self._chunks = chunks
+
+    def read(self, _size: int = -1) -> bytes:
+        """吐下一块；吐完给空串（EOF）。"""
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+def test_drain_output_lines() -> None:
+    """直播切行：LF / CR / CRLF 都算断行；尾巴也交出来。"""
+    got: list[str] = []
+    arena._drain_output(  # noqa: SLF001
+        _ChunkStream([b"\xe7\xac\xac\xe4\xb8\x80\nsecond\rthird\r\nfour"]), got.append
+    )
+    assert got == ["第一", "second", "third", "four"]
+
+
+def test_drain_output_incremental_utf8() -> None:
+    """跨块的半个汉字不会劈坏（增量解码）。"""
+    got: list[str] = []
+    han = "汉字".encode()
+    arena._drain_output(  # noqa: SLF001
+        _ChunkStream([b"a" + han[:2], han[2:] + b"\n\xe6\xb1\x89\n"]), got.append
+    )
+    assert got == ["a汉字", "汉"]
+
+
+def test_live_sink_header_footer(tmp_path: Path) -> None:
+    """直播文件：开播头 + 行 + 收官脚注。"""
+    sink = arena._LiveSink(tmp_path / "live" / "ai-1.txt", 1, "scout", 240.0)  # noqa: SLF001
+    sink.write("暖场一行")
+    sink.close(ok=True, seconds=12.3, error="")
+    text = (tmp_path / "live" / "ai-1.txt").read_text(encoding="utf-8")
+    assert "scout" in text
+    assert "限时 240s" in text
+    assert "暖场一行" in text
+    assert "ok=True" in text
+    assert "12.3s" in text
 
 
 def test_gate_reason_dual_safety() -> None:

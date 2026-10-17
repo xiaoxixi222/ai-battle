@@ -26,14 +26,19 @@
 
 时间推进由外部循环驱动（run() 用真实时钟；测试注入假时钟）：step() 一次
 只做一件事的一个切片，便于回放与断言。
+
+回合并行：声明 `parallel_turns` 的驱动（arena）每个 AI 一条唤醒节拍、回合跑在
+各自线程里——心跳 / 采样 / 终局判定不被在跑的回合阻塞（慢的 AI 只拖慢自己）。
 """
 
 from __future__ import annotations
 
 import json
+import queue
 import re
 import secrets
 import shutil
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -58,7 +63,13 @@ _MIN_PATH_PARTS = 2
 
 
 class Driver(Protocol):
-    """AI 驱动接口（M2 用 mock，M3 接 OpenCode 会话）。"""
+    """AI 驱动接口（M2 用 mock，M3 接 OpenCode 会话）。
+
+    `parallel_turns` 声明这个驱动的回合能不能并行跑：True 时内核给每个 AI
+    各开一条唤醒节拍，回合在线程里执行，主循环照常心跳与判终局。
+    """
+
+    parallel_turns: bool
 
     def attach(self, match: Match) -> None:
         """内核开局时调用，交给驱动对局引用。"""
@@ -119,6 +130,7 @@ class Match:
         self.match_id = match_id
         self.match_dir = Path(runs_dir) / match_id
         self.driver = driver
+        self.parallel_turns = bool(getattr(driver, "parallel_turns", False))
         self.clock: Callable[[], float] = clock or time.monotonic
         self.sleep: Callable[[float], None] = sleep or time.sleep
         self.log: Callable[[str], None] = log or (lambda _msg: None)
@@ -154,6 +166,13 @@ class Match:
         self.end_time: float = float("inf")
         self.next_tick: float = float("inf")
         self.next_wake: float = float("inf")
+        # 并行回合（parallel_turns）：每个 AI 一条唤醒节拍 + 在跑的回合线程
+        self._next_wake_ai: dict[int, float] = dict.fromkeys(self.ai_ids, float("inf"))
+        self._wake_threads: dict[int, threading.Thread] = {}
+        self._wake_done: queue.Queue[int] = queue.Queue()
+        # 链路是单通道：syscall / 采样 / 控制面共用一把锁，串行出入
+        self._link_lock = threading.RLock()
+        self._id_lock = threading.Lock()
 
         self._seq = 0
         self._pending_crash: str | None = None
@@ -176,6 +195,9 @@ class Match:
         self.end_time = self.t0 + self.config.duration_min * 60.0
         self.next_tick = self.t0 + self.config.tick_sec
         self.next_wake = self.t0 + self.config.wake_interval_sec
+        if self.parallel_turns:
+            start = self.t0 + self.config.wake_interval_sec
+            self._next_wake_ai = dict.fromkeys(self.ai_ids, start)
         self.ledger.log(
             "match_start",
             ai_ids=list(self.ai_ids),
@@ -184,6 +206,7 @@ class Match:
             duration_min=self.config.duration_min,
             tick_sec=self.config.tick_sec,
             wake_interval_sec=self.config.wake_interval_sec,
+            parallel_turns=self.parallel_turns,
             tokens={str(ai): tok for ai, tok in self.tokens.items()},
         )
         if self.driver is not None:
@@ -211,16 +234,24 @@ class Match:
                     break
         self._settle()
         if self.driver is not None and not self._is_ended():
-            self.next_wake = self._advance(self.next_wake, self.config.wake_interval_sec, now)
-            while now >= self.next_wake:
-                self._wake_round()
-                self.next_wake += self.config.wake_interval_sec
-                if self._is_ended():
-                    break
+            self._step_wakes(now)
         self._settle()
         if self.state == "recovery" and now >= self.recovery_deadline:
             self._recovery_fail("timeout")
         return not self._is_ended()
+
+    def _step_wakes(self, now: float) -> None:
+        """推一推唤醒：并行驱动每人一条节拍，串行驱动按轮来。"""
+        if self.parallel_turns:
+            self._reap_wakes()
+            self._dispatch_wakes(now)
+            return
+        self.next_wake = self._advance(self.next_wake, self.config.wake_interval_sec, now)
+        while now >= self.next_wake:
+            self._wake_round()
+            self.next_wake += self.config.wake_interval_sec
+            if self._is_ended():
+                break
 
     def run(self) -> None:
         """主循环：推进到终局（真实运行时配真实时钟与 sleep）。"""
@@ -236,7 +267,10 @@ class Match:
         if self.state == "running":
             points.append(self.next_tick)
         if self.driver is not None:
-            points.append(self.next_wake)
+            if self.parallel_turns:
+                points.append(min(self._next_wake_ai.values(), default=float("inf")))
+            else:
+                points.append(self.next_wake)
         if self.state == "recovery":
             points.append(self.recovery_deadline)
         return min(points)
@@ -259,6 +293,8 @@ class Match:
         self.log(f"[终局] {reason}；比分：{scores}")
         if self.driver is not None:
             self.driver.detach()
+        if self.parallel_turns:
+            self._join_wakes()
 
     def summary(self) -> dict[str, Any]:
         """终局摘要（CLI 打印 / M4 观测消费）。"""
@@ -334,19 +370,24 @@ class Match:
             return False, msg
         sid = self._next_id()
         started = self.clock()
-        try:
-            ok, content = self.link.syscall(sid, ai_id, raw, self.config.syscall_timeout_sec)
-        except LinkTimeoutError:
-            self._pending_crash = f"syscall 超过 {self.config.syscall_timeout_sec}s 无响应"
-            msg = "服务器无响应：已按崩溃处理，稍后自动重启。"
-            self.ledger.log("syscall", ai=ai_id, channel="server", raw=raw, ok=False, preview=msg)
-            return False, msg
-        except LinkClosedError:
-            self._pending_crash = "syscall 期间进程中断"
-            msg = "服务器连接中断：已按崩溃处理，稍后自动重启。"
-            self.ledger.log("syscall", ai=ai_id, channel="server", raw=raw, ok=False, preview=msg)
-            return False, msg
-        self._collect_control(grace=0.0)
+        with self._link_lock:  # 链路单通道：一次只放一发 syscall 进去
+            try:
+                ok, content = self.link.syscall(sid, ai_id, raw, self.config.syscall_timeout_sec)
+            except LinkTimeoutError:
+                self._pending_crash = f"syscall 超过 {self.config.syscall_timeout_sec}s 无响应"
+                msg = "服务器无响应：已按崩溃处理，稍后自动重启。"
+                self.ledger.log(
+                    "syscall", ai=ai_id, channel="server", raw=raw, ok=False, preview=msg
+                )
+                return False, msg
+            except LinkClosedError:
+                self._pending_crash = "syscall 期间进程中断"
+                msg = "服务器连接中断：已按崩溃处理，稍后自动重启。"
+                self.ledger.log(
+                    "syscall", ai=ai_id, channel="server", raw=raw, ok=False, preview=msg
+                )
+                return False, msg
+            self._collect_control(grace=0.0)
         self.ledger.log(
             "syscall",
             ai=ai_id,
@@ -376,10 +417,14 @@ class Match:
             self._recovery_boot_attempt()
 
     def _tick(self) -> None:
-        """一次心跳：采样访问器 →（可能）夺权判定 → 持有得分。"""
+        """一次心跳：采样访问器 →（可能）夺权判定 → 持有得分。
+
+        采样跳过（链路正忙）的这拍不记分：宁缺毋滥，别用过期状态骗分。
+        """
         if not self.up:
             return
-        self._sample(baseline=False)
+        if not self._sample(baseline=False):
+            return
         if self._pending_crash is not None:
             return
         if self.last_owner is not None:
@@ -396,17 +441,85 @@ class Match:
             self.driver.on_wake(ai)
             self._settle()
 
-    def _sample(self, *, baseline: bool) -> None:
-        """向服务器要看一眼实时 owner / 权限表；超时按崩溃候选处理。"""
+    def _dispatch_wakes(self, now: float) -> None:
+        """并行调度：给空闲且到拍的 AI 各开一条回合线程，谁也不用等谁。
+
+        节拍是每 AI 一条的“格点”：忙时错过的那几拍不补课，直接跳到下一拍；
+        同一拍点上，几个空闲的 AI 会同时开跑。
+        """
+        if self.driver is None:
+            return
+        interval = self.config.wake_interval_sec
+        for ai in self.ai_ids:
+            if self._wake_threads.get(ai) is not None:
+                if now >= self._next_wake_ai[ai]:  # 手上的回合还没收工：跳过错过的拍
+                    self._next_wake_ai[ai] = (
+                        self._advance(self._next_wake_ai[ai], interval, now) + interval
+                    )
+                continue
+            if now < self._next_wake_ai[ai]:
+                continue
+            self._next_wake_ai[ai] = self._advance(self._next_wake_ai[ai], interval, now) + interval
+            worker = threading.Thread(
+                target=self._run_wake, args=(ai,), name=f"wake-ai-{ai}", daemon=True
+            )
+            self._wake_threads[ai] = worker
+            worker.start()
+
+    def _run_wake(self, ai_id: int) -> None:
+        """一个回合线程：跑完（或炸了）都要报到，绝不让 AI 永久卡在“忙”。"""
+        try:
+            if self.driver is not None:
+                self.driver.on_wake(ai_id)
+        except Exception as err:  # noqa: BLE001 —— 线程里的异常不能悄悄死掉
+            self.log(f"[唤醒异常] AI-{ai_id}：{err!r}")
+            self.ledger.log("wake_fail", ai=ai_id, error=f"{err!r}")
+        finally:
+            self._wake_done.put(ai_id)
+
+    def _reap_wakes(self) -> None:
+        """收编跑完的回合线程（节拍在派发时已推进，这里只管清占用）。"""
+        while True:
+            try:
+                ai = self._wake_done.get_nowait()
+            except queue.Empty:
+                break
+            self._wake_threads.pop(ai, None)
+
+    def _join_wakes(self, timeout: float = 5.0) -> None:
+        """终局收尾：给在途回合最多 timeout 秒，把最后一行账记完。"""
+        deadline = time.monotonic() + timeout
+        for thread in list(self._wake_threads.values()):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
+        self._wake_threads.clear()
+
+    def _sample(self, *, baseline: bool) -> bool:
+        """向服务器要看一眼实时 owner / 权限表；返回是否真的采到了样。
+
+        并行回合下链路可能正被某次 syscall 占着：服务器是串行的，采样排到它
+        后面只会拿到过期状态、还把主循环拖住——拿不到锁就跳过这一拍。
+        """
+        if not self._link_lock.acquire(blocking=False):
+            return False
+        try:
+            return self._sample_locked(baseline=baseline)
+        finally:
+            self._link_lock.release()
+
+    def _sample_locked(self, *, baseline: bool) -> bool:
+        """`_sample` 的本体（调用时必须已持有链路锁）：超时按崩溃候选处理。"""
         sid = self._next_id()
         try:
             data = self.link.kernel_status(sid, self.config.call_timeout_sec)
         except LinkTimeoutError:
             self._pending_crash = "挂起：kernel_status 超时"
-            return
+            return False
         except LinkClosedError:
             self._pending_crash = "崩溃：进程已中断"
-            return
+            return False
         raw_owner = data.get("owner")
         if isinstance(raw_owner, int) and not isinstance(raw_owner, bool):
             owner: int | None = raw_owner
@@ -430,6 +543,7 @@ class Match:
                 self._note(f"owner 变更：{self._owner_txt(old)} → 无主")
         self.last_owner = owner
         self.last_rights = rights
+        return True
 
     # ================================================================ 失败树
 
@@ -438,7 +552,7 @@ class Match:
         penalty = self.scores.next_crash_penalty(self.last_owner)
         self.ledger.log("crash", reason=reason, owner=self.last_owner, penalty=penalty)
         self._note(f"服务器崩溃（{reason}）")
-        self.link.kill()
+        self.link.kill()  # 无锁开杀：在途等待会立刻收到“连接中断”，由对方自己收尾
         self.up = False
         self._boot_with_failtree("crash")
 
@@ -450,7 +564,7 @@ class Match:
         self.ledger.log("restart", reason="reboot", requester=requester)
         who = f"AI-{requester}" if requester is not None else "未知来源"
         self._note(f"{who} 请求重启")
-        self.link.kill()
+        self.link.kill()  # 无锁开杀（同崩溃路径）：在途等待自己收尾
         self.up = False
         self._boot_with_failtree("reboot")
 
@@ -465,7 +579,12 @@ class Match:
         self._enter_recovery()
 
     def _attempt_boot(self, reason: str) -> bool:
-        """拉起服务器并完成握手；成功则打快照 + stable。"""
+        """拉起服务器并完成握手；成功则打快照 + stable（与在途 syscall 互斥）。"""
+        with self._link_lock:
+            return self._attempt_boot_locked(reason)
+
+    def _attempt_boot_locked(self, reason: str) -> bool:
+        """`_attempt_boot` 的本体（调用时必须已持有链路锁）。"""
         self.ledger.log("spawn", reason=reason)
         default_state = self._read_default_state()
         match_meta: dict[str, Any] = {
@@ -653,8 +772,17 @@ class Match:
         self._note("owner 请求搬回并重启")
 
     def _collect_control(self, grace: float = 0.0) -> None:
-        """收罗控制面消息：把重启请求记成待办。"""
-        for msg in self.link.collect_control(grace):
+        """收罗控制面消息：把重启请求记成待办。
+
+        链路正忙（有 syscall 在途）就跳过：消息留在管道里，下一轮再收。
+        """
+        if not self._link_lock.acquire(blocking=False):
+            return
+        try:
+            messages = self.link.collect_control(grace)
+        finally:
+            self._link_lock.release()
+        for msg in messages:
             if msg.get("type") == "restart_request":
                 self._pending_restart = True
                 requester = msg.get("requester")
@@ -664,8 +792,9 @@ class Match:
                     self._restart_requester = None
 
     def _next_id(self) -> int:
-        self._seq += 1
-        return self._seq
+        with self._id_lock:
+            self._seq += 1
+            return self._seq
 
     def _is_ended(self) -> bool:
         """对局是否已终局（方法包一层，绕开调用点上的 Literal 窄化）。"""
