@@ -14,7 +14,7 @@
 
 - **Bug 描述**：发生了什么？你期望发生什么？
 - **复现步骤**：怎样可以稳定复现？
-- **环境信息**：操作系统、Python 版本、Sandboxie Plus 版本、项目版本（或 commit hash）
+- **环境信息**：操作系统、Python 版本、Docker 版本（如涉及）、项目版本（或 commit hash）
 - **相关截图或日志**：如果有的话
 
 ### 提出新功能
@@ -43,16 +43,11 @@
 git clone https://github.com/xiaoxixi222/ai-battle.git
 cd ai-battle
 
-# 创建虚拟环境并安装依赖（推荐 uv）
+# 创建虚拟环境并安装依赖
 uv sync
-
-# 或使用 pip
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
 ```
 
-项目运行在 Windows 上，依赖 Sandboxie Plus，请确保已安装 [Sandboxie Plus 1.17.5+](https://sandboxie-plus.com/downloads/)。
+开发在 Windows 上进行（起步只需要 uv + Python 3.13+）；真实对局依赖 Docker Desktop，将在 M2 阶段引入。
 
 ---
 
@@ -85,23 +80,19 @@ pip install -r requirements.txt
 
 | 范围 | 说明 |
 |:---|:---|
-| `manager` | Manager 核心 |
-| `system` | System 沙盒 API 实现 |
-| `judge` | 裁判引擎 |
-| `commentary` | 解说 AI |
-| `sandbox` | 沙盒控制模块 |
-| `client` | AI 客户端 SDK |
-| `gui` | 控制面板 GUI |
-| `web` | Web 观战面板 |
-| `api` | 通信协议 |
-| `rules` | 游戏规则文档 |
-| `docs` | 项目文档 |
+| `controler` | 内核（编排/网关/计分/回滚/抢救室） |
+| `server` | 战斗服务器基座 |
+| `arena` | OpenCode 集成（插件、game agent） |
+| `judge` | 裁判引擎（M4） |
+| `web` | 观战/回放面板（M4） |
+| `rules` | 设计文档（rules/） |
+| `docs` | 项目文档（README、CONTRIBUTING 等） |
 
 ### 示例
 
 ```
-feat(sandbox): 添加沙盒池多实例并发管理
-fix(sandbox): 修复管道死锁导致 AI 输出卡死
+feat(server): 实现基座单入口解析与权限阶梯
+fix(controler): 修复回滚时误删 state 目录
 docs: 更新 README 安装步骤
 ```
 
@@ -112,7 +103,7 @@ docs: 更新 README 安装步骤
 ## 代码风格
 
 - **Python 代码**：遵循 [PEP 8](https://peps.python.org/pep-0008/) 风格，使用 4 空格缩进
-- **命名**：类名使用大驼峰 `SandboxController`，函数和变量使用小写下划线 `start_process`
+- **命名**：类名使用大驼峰 `BattleServer`，函数和变量使用小写下划线 `handle_syscall`
 - **注释**：重要的逻辑和复杂部分请添加注释，API 类模块应包含文档字符串
 - **文件编码**：使用 UTF-8
 - **导入顺序**：标准库 → 第三方库 → 项目内部模块，每组之间空一行

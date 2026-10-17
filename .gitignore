@@ -23,3 +23,12 @@ build/
 # 系统
 .DS_Store
 Thumbs.db
+
+# tmp
+tmp_*
+*_tmp*
+tmp
+
+# 运行时产物
+battle/
+runs/
