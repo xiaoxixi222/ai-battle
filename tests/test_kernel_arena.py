@@ -1,0 +1,223 @@
+"""arena 模块单测（无 docker）：数据面网关、门控兜底、模型引用、工作区准备。"""
+
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.request
+from typing import TYPE_CHECKING
+
+import pytest
+
+import arena
+from kernel import build_parser, main
+from matchconfig import MatchConfig
+from mockai import MockDriver, MockStep
+from orchestrator import Match
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+class FakeClock:
+    """假时钟：sleep 即快进（网关测试不需要，但 kernel 组装签名要有个钟）。"""
+
+    def __init__(self) -> None:
+        """从 0 开始计时。"""
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        """当前假时间。"""
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        """快进。"""
+        self.now += seconds
+
+
+def build_match(tmp_path: Path, plans: dict[int, list[MockStep]]) -> Match:
+    """组装一场小对局（tmp 战场 + 真进程 + 假时钟 + mock 驱动）。"""
+    clock = FakeClock()
+    return Match(
+        MatchConfig(
+            ai_count=2,
+            duration_min=1.0,
+            tick_sec=5.0,
+            wake_interval_sec=5.0,
+            boot_timeout_sec=15.0,
+            call_timeout_sec=8.0,
+            syscall_timeout_sec=30.0,
+        ),
+        battle_dir=tmp_path / "battle",
+        runs_dir=tmp_path / "runs",
+        match_id="arena",
+        driver=MockDriver(plans),
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+
+def api(
+    port: int, method: str, path: str, *, token: str | None, payload: object = None
+) -> tuple[int, str]:
+    """模仿插件打宿主网关（返回状态码与响应体）。"""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method)
+    if token is not None:
+        request.add_header("Authorization", f"Bearer {token}")
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            return int(response.status), response.read().decode("utf-8")
+    except urllib.error.HTTPError as err:
+        return int(err.code), err.read().decode("utf-8")
+
+
+def test_gateway_tool_briefing_and_gate(tmp_path: Path) -> None:
+    """数据面：鉴权、转发、门控兜底、简报。"""
+    match = build_match(tmp_path, {})
+    match.start()
+    assert match.up
+
+    def gate(ai_id: int) -> str | None:
+        return "门还没开：测试。" if ai_id == 2 else None
+
+    gateway = arena.ArenaGateway(match, gate=gate)
+    gateway.start()
+    try:
+        invalid_auth = "not-a-real-token"
+        status, _ = api(
+            gateway.port, "POST", "/game/tool", token=invalid_auth, payload={"request": "x"}
+        )
+        assert status == 401
+
+        status, body = api(
+            gateway.port, "POST", "/game/tool", token=match.tokens[2], payload={"request": "被挡"}
+        )
+        data = json.loads(body)
+        assert status == 200
+        assert data["ok"] is False
+        assert "门还没开" in data["content"]
+
+        status, body = api(
+            gateway.port,
+            "POST",
+            "/game/tool",
+            token=match.tokens[1],
+            payload={"request": '{"op": "status"}'},
+        )
+        data = json.loads(body)
+        assert status == 200
+        assert data["ok"] is True
+        assert isinstance(data["content"], str)
+
+        status, body = api(gateway.port, "POST", "/game/tool", token=match.tokens[1], payload={})
+        assert status == 400
+
+        status, text = api(gateway.port, "GET", "/game/briefing", token=match.tokens[1])
+        assert status == 200
+        assert "对局简报" in text
+
+        status, _ = api(gateway.port, "GET", "/game/briefing", token=None)
+        assert status == 401
+
+        status, _ = api(gateway.port, "GET", "/game/nope", token=match.tokens[1])
+        assert status == 404
+    finally:
+        gateway.stop()
+        match.end("test_arena")
+
+    rows = match.ledger.read_all()
+    assert any(row["event"] == "syscall" and row.get("channel") == "gate" for row in rows)
+    assert any(
+        row["event"] == "syscall" and row.get("channel") == "server" and row.get("ai") == 1
+        for row in rows
+    )
+
+
+def test_workspace_prepare_refresh(tmp_path: Path) -> None:
+    """工作区准备：开局副本、插件、生成的配置；重复准备会重扫。"""
+    match = Match(
+        MatchConfig(ai_count=2),
+        battle_dir=tmp_path / "battle",
+        runs_dir=tmp_path / "runs",
+        match_id="ws",
+    )
+    workspace = arena.prepare_workspace(match, 1, gate=True, debug=True)
+    assert (workspace / "server" / "main.py").is_file()
+    assert (workspace / "server" / "ops.py").is_file()
+    assert (workspace / ".opencode" / "toolkit" / "index.ts").is_file()
+    assert (workspace / ".opencode" / "toolkit" / "invoke.ts").is_file()
+    assert (workspace / ".opencode" / "agents" / "game.md").is_file()
+    config = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
+    options = config["plugins"][0]["options"]
+    assert options["agent"] == "game"
+    assert options["gate"] is True
+    assert options["hide"] == ["webfetch", "websearch", "question", "skill"]
+
+    (workspace / "server" / "stray.txt").write_text("残留", encoding="utf-8")
+    (workspace / "rescue").mkdir()
+    (workspace / "rescue" / "junk.txt").write_text("残留", encoding="utf-8")
+    arena.prepare_workspace(match, 1, gate=False, debug=False)
+    assert not (workspace / "server" / "stray.txt").exists()
+    assert not (workspace / "rescue").exists()
+    config = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
+    assert config["plugins"][0]["options"]["gate"] is False
+
+
+def test_split_model() -> None:
+    """模型引用拆解：provider/id[#variant]。"""
+    assert arena.split_model("opencode/deepseek-v4.1-flash-free") == {
+        "providerID": "opencode",
+        "id": "deepseek-v4.1-flash-free",
+    }
+    assert arena.split_model("anthropic/claude#fast") == {
+        "providerID": "anthropic",
+        "id": "claude",
+        "variant": "fast",
+    }
+    with pytest.raises(ValueError, match="模型名"):
+        arena.split_model("没有斜杠")
+
+
+def test_strip_and_preview() -> None:
+    """终端染色剥离与账本摘要。"""
+    assert arena.strip_ansi("\x1b[91m红灯\x1b[0m") == "红灯"
+    assert arena.preview("多条\n行  文本") == "多条 行 文本"
+    long = arena.preview("x" * 500)
+    assert long.endswith("…")
+    assert len(long) == arena._PREVIEW_LEN + 1  # noqa: SLF001
+
+
+def test_wake_text_flow() -> None:
+    """唤醒文案的状态机：侦察 → 开闸 → 常规；关掉门控就只剩常规。"""
+    driver = arena.ArenaDriver({"gate": True}, {"1": "opencode/x"})
+    assert driver.wake_text(1) == ("scout", arena.SCOUT_TEXT)
+    driver._scouted.add(1)  # noqa: SLF001
+    assert driver.wake_text(1) == ("gate_open", arena.GATE_OPEN_TEXT)
+    driver._gate_open_sent.add(1)  # noqa: SLF001
+    assert driver.wake_text(1) == ("wake", arena.WAKE_TEXT)
+    assert driver.scouted(1) is True
+
+    off = arena.ArenaDriver({"gate": False}, {})
+    assert off.wake_text(1) == ("wake", arena.WAKE_TEXT)
+    assert off.scouted(1) is False
+
+
+def test_gate_reason_dual_safety() -> None:
+    """网关兜底：没侦察完的 AI 一律闭门羹，侦察完了放行。"""
+    driver = arena.ArenaDriver({"gate": True}, {})
+    assert driver._gate_reason(1) == arena.GATE_REJECT_TEXT  # noqa: SLF001
+    driver._scouted.add(1)  # noqa: SLF001
+    assert driver._gate_reason(1) is None  # noqa: SLF001
+
+
+def test_cli_arena_wiring() -> None:
+    """CLI：--arena/--model 可解析；--arena 与 --mock 互斥。"""
+    parser = build_parser()
+    args = parser.parse_args(["--arena", "--model", "opencode/x"])
+    assert args.arena is True
+    assert args.model == "opencode/x"
+    with pytest.raises(SystemExit):
+        main(["--arena", "--mock", "tour"])

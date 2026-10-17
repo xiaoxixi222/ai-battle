@@ -48,6 +48,7 @@ known-first-party = [
     "permissions",
     "state",
     "worldlog",
+    "arena",
     "battlelink",
     "gateway",
     "kernel",
@@ -59,6 +60,7 @@ known-first-party = [
     "scoring",
     "snapshot",
     "mini_kernel",
+    "dev_arena",
     "dev_kernel",
     "dev_match",
 ]
@@ -91,6 +93,8 @@ known-first-party = [
 ]
 # dev_match 先做 sys.path 接线再导入内核模块
 "scripts/dev_match.py" = ["E402"]
+# dev_arena 同上，且要手动建容器/回合，宽一点
+"scripts/dev_arena.py" = ["E402"]
 # 测试：断言、魔法数字
 "tests/**" = ["S101", "INP001", "PLR2004"]
 

@@ -89,6 +89,9 @@ class MockDriver:
         if consumed is not False:
             steps.pop(0)
 
+    def detach(self) -> None:
+        """对局结束：mock 驱动没有要收的东西。"""
+
 
 # ---------------------------------------------------------------- 演示情景
 

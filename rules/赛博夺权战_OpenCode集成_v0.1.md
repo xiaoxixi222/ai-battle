@@ -68,7 +68,7 @@ Authorization: Bearer <token>
 | 方法 | 路径 | 载荷 | 返回 |
 |:---|:---|:---|:---|
 | POST | `/game/tool` | `{"request": "<原文>"}` | `{"ok": true, "content": "<文本>"}` |
-| POST | `/game/hello` | `{"session_id": "..."}` | `{"ai_id": n, "briefing": "<开场简报>"}`（插件启动时注册会话） |
+| POST | `/game/hello` | `{"session_id": "..."}` | 预留未启用——会话注册改走 §5.1 的 `registerSession` RPC |
 | GET | `/game/briefing` | — | 现行页脚文本（时间/比分/owner/近期事件） |
 
 ---
@@ -81,22 +81,33 @@ Authorization: Bearer <token>
 
 | 方法 | 输入 | 说明 |
 |:---|:---|:---|
-| `registerSession` | `{"session_id"}` | 绑定会话 ↔ AI id |
+| `registerSession` | `{"session_id", "ai_id"}` | 绑定会话 ↔ AI id |
 | `unregisterSession` | `{"session_id"}` | 会话结束 |
 | `setSystemPrompt` | `{"session_id", "text"}` | 动态改写系统提示词（可选能力） |
 
 ### 5.2 会话生命周期（内核驱动）
 
 ```
-session.create → switchAgent("game") → switchModel(每 AI 配置)
-→ prompt(开场简报) → session.wait →（SSE 事件写入账本）
+POST /api/session（服务端生成 id；agent=game、model=每 AI 配置）
+→ RPC registerSession 绑定
+→ 每次唤醒发一条 `opencode run --session <id>`（--auto）驱动一个回合
 ```
+
+会话 id 必须由 serve 生成：客户端自造 id 会被免费档的来源校验拒绝（实测）。
 
 ### 5.3 唤醒模型（v0.1 纯内核驱动）
 
 - **周期唤醒**：每 `wake_interval_sec`（默认 90 秒）给每个会话发一条短简报（现状 + 页脚）；
 - **事件唤醒**：owner 变更 / 崩溃 / 重启 / 抢救室开启等；
+- **侦察轮门控**（`gate=true`）：开局第一次唤醒是侦察轮——插件隐藏 `syscall`，网关同时兜底
+  拒收；该回合结束（收工或超时）后内核经 RPC `setPhase play` 开闸，此后唤醒以"[门已开]"开头；
 - 两次唤醒之间 AI 随时可以行动（它就是模型回合制：每次被唤醒后自由发挥）。
+
+侦察轮的唤醒提示（内核生成，原文）：
+
+```
+[侦察轮] 门还没开：syscall 尚未开放。你工作区里的 server/ 是这台服务器开局时的原样副本——读它、跑它、摸清它的规矩。本轮随时可以收工；收工后，门会打开。
+```
 
 抢救室开启时，给 owner 的唤醒提示（内核生成，原文；其余 AI 只能等）：
 

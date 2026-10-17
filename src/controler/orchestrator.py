@@ -68,6 +68,10 @@ class Driver(Protocol):
         """唤醒一个 AI：一次唤醒 = 一次行动机会。"""
         ...
 
+    def detach(self) -> None:
+        """对局终局时调用：驱动做收尾（停容器、关网关等），幂等。"""
+        ...
+
 
 def _preview(text: str) -> str:
     """账本里存结果摘要：压平换行、截断。"""
@@ -238,7 +242,7 @@ class Match:
         return min(points)
 
     def end(self, reason: str) -> None:
-        """终局：杀进程、写账本；幂等。"""
+        """终局：杀进程、写账本、收驱动；幂等。"""
         if self.state == "ended":
             return
         self.link.kill()
@@ -253,6 +257,8 @@ class Match:
             duration_s=round(self.clock() - self.t0, 2),
         )
         self.log(f"[终局] {reason}；比分：{scores}")
+        if self.driver is not None:
+            self.driver.detach()
 
     def summary(self) -> dict[str, Any]:
         """终局摘要（CLI 打印 / M4 观测消费）。"""

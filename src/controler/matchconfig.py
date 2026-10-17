@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_SERVER = REPO_ROOT / "src" / "server"
+ARENA_DIR = REPO_ROOT / "arena"
 DEFAULT_BATTLE = REPO_ROOT / "battle"
 DEFAULT_RUNS = REPO_ROOT / "runs"
 
@@ -51,6 +52,7 @@ class MatchConfig:
     docker: dict[str, Any] = field(default_factory=dict)
     scores: ScoreConfig = field(default_factory=ScoreConfig)
     models: dict[str, str] = field(default_factory=dict)
+    arena: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MatchConfig:
@@ -83,6 +85,28 @@ class MatchConfig:
         base.update(self.docker)
         return base
 
+    def arena_settings(self) -> dict[str, Any]:
+        """arena（OpenCode 容器）驱动的合并参数（默认值 + 配置覆盖）。
+
+        gate=true 开侦察轮：插件先藏 syscall，该 AI 首回合收工后经 RPC 开闸。
+        """
+        base: dict[str, Any] = {
+            "image": "ai-battle-ai:latest",
+            "cpus": "1.5",
+            "memory": "1g",
+            "pids": 512,
+            "serve_port": 4096,
+            "gate": True,
+            "agent": "game",
+            "opencode_bin": "/root/.opencode/bin/opencode",
+            "ready_timeout_sec": 90.0,
+            "turn_timeout_sec": 900.0,
+            "debug": False,
+            "print_logs": False,
+        }
+        base.update(self.arena)
+        return base
+
     def validate(self) -> None:
         """轻校验：挡明显写错的配置（取值/范围），不做业务推断。"""
         if self.ai_count not in (2, 3):
@@ -94,6 +118,9 @@ class MatchConfig:
         if self.runner not in ("local", "docker"):
             msg = f"runner 必须是 local 或 docker：{self.runner!r}"
             raise ValueError(msg)
+        if not isinstance(self.arena, dict):
+            msg = f"arena 必须是对象：{self.arena!r}"
+            raise TypeError(msg)
         for name in (
             "duration_min",
             "tick_sec",
