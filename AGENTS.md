@@ -10,7 +10,7 @@
 
 - 项目已推倒重写：旧设计（Sandboxie、Manager/System、v3.0 规则）被有意删除，git 历史里的旧文档**仅考古用，不要复活**。
 - 设计冻结于 v0.1，唯一权威在 `rules/`：《核心规则》《系统架构》《基座 ABI》《OpenCode 集成》。
-- 里程碑：M1 基座服务器（`src/server/`）→ M2 内核 → M3 OpenCode 集成 → M4 观测。当前在 M1。
+- 里程碑：M1 基座服务器（`src/server/`，已完成）→ M2 内核 → M3 OpenCode 集成 → M4 观测。
 
 ## 目录与入口
 

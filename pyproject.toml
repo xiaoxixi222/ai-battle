@@ -1,7 +1,7 @@
 [project]
 name = "ai-battle"
 version = "0.1.0"
-description = "Add your description here"
+description = "赛博夺权战：多 AI 操作系统夺权竞技平台"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
