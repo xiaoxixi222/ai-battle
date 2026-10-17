@@ -1,0 +1,47 @@
+// 赛博夺权战 · arena 配置域（M3）—— AI 侧唯一入口
+//
+// 本目录只对「在 arena/ 目录下打开的 OpenCode 会话」生效；仓库其它位置的日常会话看不见它，
+// 反过来这里的一切也不会泄漏出去。参见 rules/《OpenCode 集成》第九节。
+//
+// 只有一个 agent：`game`（见 .opencode/agents/game.md），和唯一一扇门 `syscall`
+//（见 .opencode/toolkit/，插件注册 + 工具可见性 + 页脚简报 + 控制面 RPC）。
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // 插件：arena 工具箱（路径相对本文件所在目录解析；V2 要目录、不要文件）
+  "plugins": [
+    {
+      "package": "./.opencode/toolkit",
+      "options": {
+        // ===== 开发域（本机演练，无容器沙盒）======
+        // 除白名单外一律隐藏：只留那扇门，和"召唤自己"的 subagent。
+        "agent": "game",
+        "only": ["syscall", "subagent"],
+        "gate": false,
+        "debug": true
+
+        // ===== 对战域（AI 容器内，由内核生成配置时改用这一组）=====
+        // "agent": "game",
+        // "hide": ["webfetch", "websearch", "question", "skill"],
+        // "gate": true,    // 侦察轮：开局隐藏 syscall；该 AI 收工（或到上限）后由内核经 RPC setPhase 打开
+        // "debug": false
+      }
+    }
+  ],
+
+  // 开发域双保险：可见性由插件钩子负责，这里是"调用被拒"层的兜底——
+  // 万一插件没加载，game 也摸不到宿主机文件与命令。
+  // （对战域不叠这一组：那里的原生工具本就该全开。）
+  "agents": {
+    "game": {
+      "permissions": [
+        { "action": "read", "resource": "*", "effect": "deny" },
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "glob", "resource": "*", "effect": "deny" },
+        { "action": "grep", "resource": "*", "effect": "deny" },
+        { "action": "shell", "resource": "*", "effect": "deny" },
+        { "action": "execute", "resource": "*", "effect": "deny" }
+      ]
+    }
+  }
+}
