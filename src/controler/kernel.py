@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tick-sec", type=float, help="覆盖心跳间隔（秒）")
     parser.add_argument("--wake-sec", type=float, help="覆盖唤醒间隔（秒）")
     parser.add_argument(
-        "--scout-sec", type=float, help="arena：侦察轮限时（秒；到点强制收工即开闸）"
+        "--scout-sec", type=float, help="arena：侦察轮限时（秒；到点硬杀收工，全员收工后统一开闸）"
     )
     parser.add_argument(
         "--no-parallel", action="store_true", help="arena：回合改回串行调度（默认并行）"

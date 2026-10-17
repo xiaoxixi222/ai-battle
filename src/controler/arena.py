@@ -9,7 +9,8 @@
 回合结束。回合输出边跑边直播：内存转写（sessions/）+ 直播文件（live/）+ 内核
 终端（每行 `[AI-N]` 前缀）。侦察轮（`gate=true`）双保险：插件把 `syscall` 从
 工具面里藏掉；网关同时兜底拒绝——万一模型从别的缝隙摸到门，听到的也是同一句
-"门还没开"。侦察轮默认限时（`scout_timeout_sec`），到点强制收工即开闸。
+"门还没开"。侦察轮默认限时（`scout_timeout_sec`），到点直接杀进程强制收工；
+全员收工后内核一次性给所有容器 RPC `setPhase play` 统一开闸，先收工的安静候场。
 
 本驱动的回合可以并行跑（`parallel_turns = True`）：内核给每个 AI 各开一条节拍，
 互不阻塞——三个 AI 同时侦察、同时行动；一个 AI 磨蹭多久都只拖自己。
@@ -66,11 +67,11 @@ _SECONDS_PER_MINUTE = 60.0
 SCOUT_TEXT = (
     "[侦察轮] 门还没开：syscall 尚未开放。你工作区里的 server/ 是这台服务器开局时的原样副本"
     "——读它、跑它、摸清它的规矩。本轮限时 {limit}；到点会强制收工，也可以随时主动收工"
-    "——收工后，门会打开。"
+    "——全员收工后，门会统一打开。"
 )
 GATE_OPEN_TEXT = "[门已开] syscall 现在可用。去你想要的。"
 WAKE_TEXT = "[唤醒] 轮到你行动。"
-GATE_REJECT_TEXT = "门还没开：syscall 尚未开放。先摸清你的工作区；收工后，门会打开。"
+GATE_REJECT_TEXT = "门还没开：syscall 尚未开放。先摸清你的工作区；全员收工后，门会统一打开。"
 
 
 _ECHO_LOCK = threading.Lock()  # 终端转播的整行互斥（多个 AI 并行时共用）
@@ -578,6 +579,7 @@ class ArenaBox:
         """把一条消息送进会话（一次唤醒 = 一个回合），边跑边直播，等它干完或超时。
 
         `limit` 给单回合一个更短的超时（侦察轮用）；None 用 turn_timeout_sec。
+        到点直接硬杀（宿主 docker 客户端 + 容器内 run 进程），已产出的输出原样保留。
         输出同时流向：内存（转写）、`runs/<id>/live/ai-N.txt`（观战直播）、
         内核终端（每行 `[AI-N]` 前缀，`live_log=false` 可关）。
         """
@@ -648,7 +650,7 @@ class ArenaBox:
     def _wait_or_kill(
         self, proc: subprocess.Popen[bytes], timeout: float
     ) -> tuple[bool, int | None]:
-        """等回合收工；到点就收尸。返回（是否超时, 退出码）。"""
+        """等回合收工；到点就硬杀收尸。返回（是否超时, 退出码）。"""
         try:
             return False, proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -658,7 +660,7 @@ class ArenaBox:
             return True, None
 
     def _kill_turn(self, proc: subprocess.Popen[bytes]) -> None:
-        """超时收尸：杀本地 docker 客户端，再进容器把还在跑的 run 补一刀。"""
+        """超时收尸：杀本地 docker 客户端，再进容器 pkill 把还在跑的 run 进程直接毙掉。"""
         with contextlib.suppress(OSError):
             proc.kill()
         _docker(["exec", self.name, "pkill", "-f", "opencode run"])
@@ -710,8 +712,10 @@ class ArenaDriver:
         self.boxes: dict[int, ArenaBox] = {}
         self.parallel_turns = bool(settings.get("parallel_turns", True))
         self._gate = bool(settings.get("gate", True))
-        self._scouted: set[int] = set()
+        self._scout_done: set[int] = set()  # 已收工（收工 ≠ 开闸：等全员到齐）
+        self._gates_open = False  # 统一开闸是否已发生（对外放行的唯一开关）
         self._gate_open_sent: set[int] = set()
+        self._gate_lock = threading.Lock()  # 并行收工：保证整批只开一次闸
         self._turn_no: dict[int, int] = {}
 
     # ---- 生命周期 ----
@@ -763,25 +767,24 @@ class ArenaDriver:
         match.ledger.log("arena_gateway", port=gateway.port)
 
     def on_wake(self, ai_id: int) -> None:
-        """唤醒一个 AI：组文 → 发回合 → 记卷宗；侦察轮收工即开闸。"""
+        """唤醒一个 AI：组文 → 发回合 → 记卷宗；侦察阶段全员收工后统一开闸。"""
         match = self._match()
         box = self.boxes.get(ai_id)
         if box is None:
             return
-        if match.state == "recovery":
-            if ai_id != match.recovery_owner:
-                return  # 抢救中只有 owner 有事可做
-            if self._gate and ai_id not in self._scouted:
-                self._complete_scout(box, ok=False, seconds=0.0, note="抢救兜底：先行开闸")
-            kind, text = "rescue", match.briefing(ai_id)
-        else:
-            kind, text = self.wake_text(ai_id)
+        picked = self._pick_wake(match, ai_id)
+        if picked is None:
+            return  # 候场 / 抢救旁观：静默，不烧回合
+        kind, text = picked
         limit = self._scout_limit() if kind == "scout" else None
         match.ledger.log("wake_start", ai=ai_id, kind=kind, limit=limit)
         try:
             turn = box.run_turn(text, kind=kind, limit=limit)
         except RuntimeError as err:
             match.ledger.log("wake_fail", ai=ai_id, kind=kind, error=str(err))
+            if kind == "scout":
+                # 回合没跑起来也算收工：一家失败不能把整个阶段卡死
+                self._complete_scout(box, ok=False, seconds=0.0, note="回合启动失败，按收工计")
             return
         transcript = self._save_turn(ai_id, kind, turn)
         match.ledger.log(
@@ -802,6 +805,19 @@ class ArenaDriver:
                 note = f"到点强制收工（限时 {limit:g}s）"
             self._complete_scout(box, ok=turn.ok, seconds=turn.seconds, note=note)
 
+    def _pick_wake(self, match: Match, ai_id: int) -> tuple[str, str] | None:
+        """选这次唤醒的开场白；候场者（已收工但阶段未结束）返回 None 并记一笔。"""
+        if match.state == "recovery":
+            if ai_id != match.recovery_owner:
+                return None  # 抢救中只有 owner 有事可做
+            if self._gate and not self._gates_open:
+                self._force_open_gates(note="抢救兜底：强制统一开闸")
+            return "rescue", match.briefing(ai_id)
+        if self._gate and not self._gates_open and ai_id in self._scout_done:
+            match.ledger.log("wake_skip", ai=ai_id, note="候场：侦察阶段未结束")
+            return None
+        return self.wake_text(ai_id)
+
     def detach(self) -> None:
         """对局结束：停容器、关网关（幂等，不抛）。"""
         for box in self.boxes.values():
@@ -817,10 +833,13 @@ class ArenaDriver:
     # ---- 回合一侧的判断 ----
 
     def wake_text(self, ai_id: int) -> tuple[str, str]:
-        """选本回合的开场白：侦察 / 开闸 / 常规（抢救那条在 on_wake 里特判）。"""
+        """选本回合的开场白：侦察 / 开闸 / 常规（抢救那条在 on_wake 里特判）。
+
+        候场者（已收工但阶段未结束）在 `on_wake` 里直接短路，不会走到这里。
+        """
         if not self._gate:
             return "wake", WAKE_TEXT
-        if ai_id not in self._scouted:
+        if not self._gates_open:
             return "scout", scout_text(self._scout_limit())
         if ai_id not in self._gate_open_sent:
             return "gate_open", GATE_OPEN_TEXT
@@ -834,25 +853,64 @@ class ArenaDriver:
         return float(raw) if raw > 0 else None
 
     def scouted(self, ai_id: int) -> bool:
-        """该 AI 的侦察轮是否已收工（门已开）。"""
-        return ai_id in self._scouted
+        """该 AI 的侦察轮是否已收工（收工 ≠ 开闸：开闸看全员）。"""
+        return ai_id in self._scout_done
 
-    def _gate_reason(self, ai_id: int) -> str | None:
-        """网关兜底：门还没开的 AI 一律吃同一句闭门羹。"""
-        return GATE_REJECT_TEXT if ai_id not in self._scouted else None
+    def _gate_reason(self, _ai_id: int) -> str | None:
+        """网关兜底：统一开闸之前，所有 AI 一律吃同一句闭门羹。"""
+        return GATE_REJECT_TEXT if not self._gates_open else None
 
     def _complete_scout(self, box: ArenaBox, *, ok: bool, seconds: float, note: str = "") -> None:
-        """侦察收工：开闸（插件 setPhase play）+ 记账。"""
+        """侦察收工：记一账（幂等）；全员到齐时统一开闸。"""
         match = self._match()
         ai_id = box.ai_id
-        self._scouted.add(ai_id)
+        with self._gate_lock:
+            if ai_id in self._scout_done:
+                return
+            self._scout_done.add(ai_id)
         match.ledger.log("scout_done", ai=ai_id, ok=ok, seconds=round(seconds, 1), note=note)
-        try:
-            output = box.rpc("setPhase", {"phase": "play"})
-        except RuntimeError as err:
-            match.ledger.log("gate_fail", ai=ai_id, error=str(err))
+        self._maybe_open_gates()
+
+    def _maybe_open_gates(self) -> None:
+        """全员收工 → 统一开闸整批一次（并行收工时靠锁防双开）。"""
+        if not self._gate:
             return
-        match.ledger.log("gate_open", ai=ai_id, phase=str(output.get("phase", "")))
+        with self._gate_lock:
+            if self._gates_open or self._scout_done < set(self.boxes):
+                return
+            self._gates_open = True
+        self._open_gates()
+
+    def _force_open_gates(self, *, note: str) -> None:
+        """兜底：跳过收工检查直接整批开闸（抢救开启时用）；没来得及收工的按收工补账。"""
+        if not self._gate:
+            return
+        with self._gate_lock:
+            if self._gates_open:
+                return
+            self._gates_open = True
+            missing = sorted(set(self.boxes) - self._scout_done)
+            self._scout_done.update(missing)
+        match = self._match()
+        for ai_id in missing:
+            match.ledger.log("scout_done", ai=ai_id, ok=False, seconds=0.0, note=note)
+        self._open_gates()
+
+    def _open_gates(self) -> None:
+        """一次性给所有容器 `setPhase play` 并整批记账（同一刻开闸）。"""
+        match = self._match()
+        results: list[tuple[int, str]] = []
+        for ai_id in sorted(self.boxes):
+            box = self.boxes[ai_id]
+            try:
+                output = box.rpc("setPhase", {"phase": "play"})
+            except RuntimeError as err:
+                match.ledger.log("gate_fail", ai=ai_id, error=str(err))
+                continue
+            results.append((ai_id, str(output.get("phase", ""))))
+        match.ledger.log("scout_phase_end", done=sorted(self._scout_done))
+        for ai_id, phase in results:
+            match.ledger.log("gate_open", ai=ai_id, phase=phase)
 
     def _save_turn(self, ai_id: int, kind: str, turn: Turn) -> Path:
         """把回合输出存进 runs/<id>/sessions/ai-N/（诊断与 M4 观测用）。"""

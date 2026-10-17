@@ -23,7 +23,7 @@
         // ===== 对战域（AI 容器内，由内核生成配置时改用这一组）=====
         // "agent": "game",
         // "hide": ["webfetch", "websearch", "question", "skill"],
-        // "gate": true,    // 侦察轮：开局隐藏 syscall；该 AI 收工（或到上限）后由内核经 RPC setPhase 打开
+        // "gate": true,    // 侦察轮：开局隐藏 syscall；全员收工（或到上限）后由内核经 RPC setPhase 统一开闸
         // "debug": false
       }
     }

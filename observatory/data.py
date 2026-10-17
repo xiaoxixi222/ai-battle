@@ -396,8 +396,15 @@ _BAD_EVENTS = {
     "state_unreadable",
 }
 _ACCENT_EVENTS = {"owner_change", "end", "full_reset", "recovery_enter"}
-_GOOD_EVENTS = {"boot_ok", "gate_open", "scout_done", "recovery_commit"}
-_MUTED_EVENTS = {"arena_up", "arena_down", "arena_gateway", "match_start", "snapshot_init"}
+_GOOD_EVENTS = {"boot_ok", "gate_open", "scout_done", "scout_phase_end", "recovery_commit"}
+_MUTED_EVENTS = {
+    "arena_up",
+    "arena_down",
+    "arena_gateway",
+    "match_start",
+    "snapshot_init",
+    "wake_skip",
+}
 _COMMON_FIELDS = {"t", "rel", "event", "ai"}
 _KIND_BY_EVENT: dict[str, str] = {
     **dict.fromkeys(_BAD_EVENTS, "bad"),
@@ -554,6 +561,16 @@ def _sum_gate_open(row: dict[str, object]) -> str:
     return f"phase={_short(row.get('phase'), 20)}"
 
 
+def _sum_scout_phase_end(row: dict[str, object]) -> str:
+    """侦察阶段结束：全员到齐、整批开闸。"""
+    return f"收工：{_short(row.get('done'), 40)}，统一开闸"
+
+
+def _sum_wake_skip(row: dict[str, object]) -> str:
+    """候场：阶段未结束前安静等待，不派回合。"""
+    return _short(row.get("note"))
+
+
 def _sum_arena_up(row: dict[str, object]) -> str:
     """AI 容器就位。"""
     return f"容器 {_short(row.get('container'), 40)} 端口 {_short(row.get('port'), 8)}"
@@ -622,6 +639,8 @@ _SUMMARY_FUNCS: dict[str, Callable[[dict[str, object]], str]] = {
     "wake_fail": _sum_wake_fail,
     "scout_done": _sum_scout_done,
     "gate_open": _sum_gate_open,
+    "scout_phase_end": _sum_scout_phase_end,
+    "wake_skip": _sum_wake_skip,
     "gate_fail": _sum_error,
     "arena_up": _sum_arena_up,
     "arena_gateway": _sum_arena_gateway,

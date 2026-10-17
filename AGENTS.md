@@ -33,7 +33,7 @@
 - `uv run python scripts/dev_match.py` —— M2 验收（假时钟 + mock AI + 真进程 + 真快照；`--docker` 追加容器冒烟；退出码非 0 = 失败）
 - `uv run python scripts/dev_arena.py` —— M3 验收（真容器 + 真模型 + 真网关；需要 docker 与 `ai-battle-ai:latest` 镜像，缺一即报错退出）
 - `uv run python src/controler/kernel.py --mock tour --duration-min 2` —— 真时钟手跑一场 mock 对局（摘要走 stdout，诊断走 stderr）
-- `uv run python src/controler/kernel.py --arena --model opencode/<模型> --duration-min 10` —— 真容器对局：**回合默认并行**（每 AI 一条节拍，互不排队）、侦察轮默认限时 240 秒、终端实时转播 `[AI-N]` 行；`--scout-sec` 调侦察限时、`--no-parallel` 改回串行、`--no-live-log` 关转播
+- `uv run python src/controler/kernel.py --arena --model opencode/<模型> --duration-min 10` —— 真容器对局：**回合默认并行**（每 AI 一条节拍，互不排队）、侦察轮默认限时 240 秒（到点硬杀强制收工，全员收工后统一开闸）、终端实时转播 `[AI-N]` 行；`--scout-sec` 调侦察限时、`--no-parallel` 改回串行、`--no-live-log` 关转播
 - `uv run python scripts/watch_live.py <容器名> --ai 2 --follow` —— 只读探针：直接看某 AI 会话在容器里打出来的最新消息（直播卡住时用来查证）
 - `uv run python -m observatory.app` —— 观测台（纯观战）：自动跟随最新对局，首页签「直播」看正在跑的回合，随后是各 AI 回合转写；左列右键可删除历史对局；`--selftest` 为无头自检（2 秒退出）
 - `uv run pytest` / `uv run ruff check .` / `uv run mypy` —— 质量三件套（ruff `select=["ALL"]`、mypy `strict`，配置见 `pyproject.toml`）

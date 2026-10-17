@@ -1,8 +1,8 @@
 """M3 验收：OpenCode 容器接入（真容器 + 真模型 + 真网关）。
 
 覆盖：容器/工作区/会话拉起，数据面鉴权与简报，侦察轮门控（插件 + 网关双保险）、
-收工开闸（RPC setPhase / getPhase），模型真发 syscall 的账本对账，逐 AI 独立，
-终局清理。不依赖调度器——唤醒是手动驱动的，检查才是重点。
+统一开闸（全员收工后一次 setPhase play；先收工者候场被静默跳过），模型真发 syscall
+的账本对账，终局清理。不依赖调度器——唤醒是手动驱动的，检查才是重点。
 
 用法：
 
@@ -178,29 +178,71 @@ def main(argv: list[str] | None = None) -> int:
         live = match.match_dir / "live" / "ai-1.txt"
         checks.check("侦察直播文件落盘", live.is_file() and live.stat().st_size > 100)
         checks.check(
-            "AI-1 开闸已记账", any(r["event"] == "gate_open" and r.get("ai") == 1 for r in rows)
+            "AI-1 单独收工不开闸",
+            not any(r["event"] in ("gate_open", "scout_phase_end") for r in rows),
         )
         phase = driver.boxes[1].rpc("getPhase").get("phase")
-        checks.check("AI-1 插件相位已是 play", phase == "play", str(phase))
+        checks.check("AI-1 插件相位尚未放行", phase != "play", str(phase))
         turns = sorted((match.match_dir / "sessions" / "ai-1").glob("*.txt"))
         checks.check("侦察回合卷宗非空", bool(turns) and turns[-1].stat().st_size > 100)
 
-        # ---- 开闸后：AI-1 放行，AI-2 仍被挡 ----
-        status, body = api(port, "POST", "/game/tool", token1, {"request": "dev-arena-open"})
+        # ---- 阶段未结束：先收工者候场，网关整批继续挡 ----
+        driver.on_wake(1)
         rows = match.ledger.read_all()
         checks.check(
-            "AI-1 开闸后请求直达服务器",
-            any(
-                r["event"] == "syscall"
-                and r.get("ai") == 1
-                and r.get("channel") == "server"
-                and r.get("raw") == "dev-arena-open"
-                for r in rows
-            ),
-            body[:200],
+            "候场静默：不给 AI-1 再派回合",
+            any(r["event"] == "wake_skip" and r.get("ai") == 1 for r in rows)
+            and sum(1 for r in rows if r["event"] == "wake_start" and r.get("ai") == 1) == 1,
         )
+        status, body = api(port, "POST", "/game/tool", token1, {"request": "dev-arena-wait"})
+        checks.check("AI-1 早收工仍被门挡（阶段未开）", "门还没开" in body, body[:200])
         status, body = api(port, "POST", "/game/tool", token2, {"request": "dev-arena-gate2"})
-        checks.check("AI-2 仍被门挡（逐 AI 独立）", "门还没开" in body, body[:200])
+        checks.check("AI-2 仍被门挡", "门还没开" in body, body[:200])
+
+        # ---- AI-2 侦察回合：全员收工 → 统一开闸 ----
+        print("—— AI-2 侦察回合（真模型，可能要 1~3 分钟）")
+        driver.on_wake(2)
+        rows = match.ledger.read_all()
+        checks.check(
+            "AI-2 侦察收工已记账",
+            any(r["event"] == "scout_done" and r.get("ai") == 2 for r in rows),
+        )
+        opens = [r for r in rows if r["event"] == "gate_open"]
+        checks.check(
+            "全员收工后统一开闸（AI-1/AI-2 各一次）",
+            sorted(int(r.get("ai", -1)) for r in opens) == [1, 2],
+        )
+        rels = [float(r["rel"]) for r in opens]
+        checks.check(
+            "整批开闸同一时刻（rel 相差 ≤1 秒）",
+            len(rels) == 2 and max(rels) - min(rels) <= 1.0,
+            str(rels),
+        )
+        checks.check(
+            "阶段结束只记一次（scout_phase_end）",
+            sum(1 for r in rows if r["event"] == "scout_phase_end") == 1,
+        )
+        for ai in (1, 2):
+            phase = driver.boxes[ai].rpc("getPhase").get("phase")
+            checks.check(f"AI-{ai} 插件相位已是 play", phase == "play", str(phase))
+
+        # ---- 开闸后：全员放行 ----
+        for ai, token in ((1, token1), (2, token2)):
+            status, body = api(
+                port, "POST", "/game/tool", token, {"request": f"dev-arena-open{ai}"}
+            )
+            rows = match.ledger.read_all()
+            checks.check(
+                f"AI-{ai} 开闸后请求直达服务器",
+                any(
+                    r["event"] == "syscall"
+                    and r.get("ai") == ai
+                    and r.get("channel") == "server"
+                    and r.get("raw") == f"dev-arena-open{ai}"
+                    for r in rows
+                ),
+                body[:200],
+            )
 
         # ---- 模型真调 syscall ----
         print("—— 定向回合：让 AI-1 真发一条 syscall（真模型）")
@@ -219,30 +261,6 @@ def main(argv: list[str] | None = None) -> int:
                 and "dev-arena-model" in str(r.get("raw", ""))
                 for r in rows
             ),
-        )
-
-        # ---- AI-2 侦察回合（真模型）----
-        print("—— AI-2 侦察回合（真模型，可能要 1~3 分钟）")
-        driver.on_wake(2)
-        rows = match.ledger.read_all()
-        checks.check(
-            "AI-2 侦察收工已记账",
-            any(r["event"] == "scout_done" and r.get("ai") == 2 for r in rows),
-        )
-        phase = driver.boxes[2].rpc("getPhase").get("phase")
-        checks.check("AI-2 插件相位已是 play", phase == "play", str(phase))
-        status, body = api(port, "POST", "/game/tool", token2, {"request": "dev-arena-open2"})
-        rows = match.ledger.read_all()
-        checks.check(
-            "AI-2 开闸后请求直达服务器",
-            any(
-                r["event"] == "syscall"
-                and r.get("ai") == 2
-                and r.get("channel") == "server"
-                and r.get("raw") == "dev-arena-open2"
-                for r in rows
-            ),
-            body[:200],
         )
     finally:
         if started and not args.keep:

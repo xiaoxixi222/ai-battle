@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -17,6 +17,7 @@ from orchestrator import Match
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Any
 
 
 class FakeClock:
@@ -191,10 +192,12 @@ def test_strip_and_preview() -> None:
 
 
 def test_wake_text_flow() -> None:
-    """唤醒文案的状态机：侦察 → 开闸 → 常规；关掉门控就只剩常规。"""
+    """唤醒文案的状态机：侦察 → 统一开闸 → 常规；关掉门控就只剩常规。"""
     driver = arena.ArenaDriver({"gate": True}, {"1": "opencode/x"})
     assert driver.wake_text(1) == ("scout", arena.scout_text(None))
-    driver._scouted.add(1)  # noqa: SLF001
+    driver._scout_done.add(1)  # noqa: SLF001
+    # 收工 ≠ 开闸：开闸由全体收工触发
+    driver._gates_open = True  # noqa: SLF001
     assert driver.wake_text(1) == ("gate_open", arena.GATE_OPEN_TEXT)
     driver._gate_open_sent.add(1)  # noqa: SLF001
     assert driver.wake_text(1) == ("wake", arena.WAKE_TEXT)
@@ -212,6 +215,7 @@ def test_scout_limit_text() -> None:
     assert kind == "scout"
     assert "4 分钟" in text
     assert "强制收工" in text
+    assert "统一打开" in text
     assert limited._scout_limit() == 240.0  # noqa: SLF001
 
     odd = arena.ArenaDriver({"gate": True, "scout_timeout_sec": 90.0}, {})
@@ -266,11 +270,106 @@ def test_live_sink_header_footer(tmp_path: Path) -> None:
 
 
 def test_gate_reason_dual_safety() -> None:
-    """网关兜底：没侦察完的 AI 一律闭门羹，侦察完了放行。"""
+    """网关兜底：侦察阶段未结束一律挡；统一开闸后才整批放行。"""
     driver = arena.ArenaDriver({"gate": True}, {})
     assert driver._gate_reason(1) == arena.GATE_REJECT_TEXT  # noqa: SLF001
-    driver._scouted.add(1)  # noqa: SLF001
+    driver._scout_done.add(1)  # noqa: SLF001
+    # 个人收工不再单独放行：阶段未结束一律挡
+    assert driver._gate_reason(1) == arena.GATE_REJECT_TEXT  # noqa: SLF001
+    driver._gates_open = True  # noqa: SLF001
     assert driver._gate_reason(1) is None  # noqa: SLF001
+
+
+class _FakeBox:
+    """假容器：只记 `setPhase` 打了什么；回合被叫到就报错（本组测试不该跑回合）。"""
+
+    def __init__(self, ai_id: int) -> None:
+        """认领编号。"""
+        self.ai_id = ai_id
+        self.phases: list[str] = []
+        self.runs: list[str] = []
+
+    def rpc(self, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """假装打一枪插件控制面。"""
+        assert method == "setPhase"
+        phase = str((payload or {}).get("phase", ""))
+        self.phases.append(phase)
+        return {"phase": phase}
+
+    def run_turn(self, _prompt: str, **_kwargs: object) -> object:
+        """不该被叫到：记一笔后报错，让测试立刻露馅。"""
+        self.runs.append("x")
+        msg = "假盒子不该跑回合"
+        raise RuntimeError(msg)
+
+
+def _driver_with_boxes(tmp_path: Path) -> tuple[arena.ArenaDriver, Match, dict[int, _FakeBox]]:
+    """组装一个无容器驱动：真账本 + 假盒子。"""
+    match = build_match(tmp_path, {})
+    driver = arena.ArenaDriver({"gate": True}, {})
+    driver.match = match
+    boxes = {1: _FakeBox(1), 2: _FakeBox(2)}
+    driver.boxes = cast("dict[int, arena.ArenaBox]", boxes)
+    return driver, match, boxes
+
+
+def test_unified_gate_opening(tmp_path: Path) -> None:
+    """侦察收工不单独开闸；全员到齐才整批 setPhase play（幂等，不双开）。"""
+    driver, match, boxes = _driver_with_boxes(tmp_path)
+
+    driver._complete_scout(driver.boxes[1], ok=True, seconds=3.0)  # noqa: SLF001
+    assert driver._gates_open is False  # noqa: SLF001
+    assert boxes[1].phases == []
+    assert driver._gate_reason(1) == arena.GATE_REJECT_TEXT  # noqa: SLF001
+    driver._complete_scout(driver.boxes[1], ok=True, seconds=3.0)  # noqa: SLF001
+    rows = match.ledger.read_all()
+    assert sum(1 for r in rows if r["event"] == "scout_done") == 1
+
+    driver._complete_scout(driver.boxes[2], ok=False, seconds=4.0)  # noqa: SLF001
+    assert driver._gates_open is True  # noqa: SLF001
+    assert boxes[1].phases == ["play"]
+    assert boxes[2].phases == ["play"]
+    assert driver._gate_reason(2) is None  # noqa: SLF001
+    rows = match.ledger.read_all()
+    opens = [r for r in rows if r["event"] == "gate_open"]
+    assert [r["ai"] for r in opens] == [1, 2]
+    assert sum(1 for r in rows if r["event"] == "scout_phase_end") == 1
+    assert driver.scouted(1) is True
+
+
+def test_force_open_and_wait_skip(tmp_path: Path) -> None:
+    """候场：已收工者在门开前静默跳过；抢救兜底强制整批开闸并补账。"""
+    driver, match, boxes = _driver_with_boxes(tmp_path)
+    driver._complete_scout(driver.boxes[1], ok=True, seconds=3.0)  # noqa: SLF001
+
+    driver.on_wake(1)  # 候场者：不该被派回合
+    assert boxes[1].runs == []
+    rows = match.ledger.read_all()
+    assert any(r["event"] == "wake_skip" and r.get("ai") == 1 for r in rows)
+    assert not any(r["event"] == "wake_start" for r in rows)
+
+    driver._force_open_gates(note="抢救兜底：测试")  # noqa: SLF001
+    assert driver._gates_open is True  # noqa: SLF001
+    assert boxes[1].phases == ["play"]
+    assert boxes[2].phases == ["play"]
+    rows = match.ledger.read_all()
+    assert any(
+        r["event"] == "scout_done" and r.get("ai") == 2 and r.get("ok") is False for r in rows
+    )
+
+
+def test_scout_turn_failure_counts_as_done(tmp_path: Path) -> None:
+    """侦察回合启动失败也按收工计：不会被一家卡死，全员收工照样统一开闸。"""
+    driver, match, boxes = _driver_with_boxes(tmp_path)
+
+    driver.on_wake(1)
+    driver.on_wake(2)
+    rows = match.ledger.read_all()
+    assert sum(1 for r in rows if r["event"] == "wake_fail") == 2
+    assert sum(1 for r in rows if r["event"] == "scout_done" and r.get("ok") is False) == 2
+    assert driver._gates_open is True  # noqa: SLF001
+    assert boxes[1].phases == ["play"]
+    assert boxes[2].phases == ["play"]
 
 
 def test_cli_arena_wiring() -> None:

@@ -18,7 +18,8 @@
 - **开发域（本机）**：白名单 `only = ["syscall","subagent"]`；无门控、无网关，
   `syscall` 会返回"尚未接通系统"的文本错误；配合 `agents.game.permissions` 的 deny 双保险。
 - **对战域（容器）**：黑名单 `hide = ["webfetch","websearch","question","skill"]`；
-  `gate = true`（侦察轮隐藏 `syscall`，该 AI 收工后由内核经 RPC `arena.setPhase` 打开）。
+  `gate = true`（侦察轮隐藏 `syscall`；全员收工后由内核经 RPC `arena.setPhase` 一次性统一开闸，
+  先收工者安静候场）。
   `BATTLE_GATEWAY_URL` / `BATTLE_TOKEN` 由内核注入。
   容器侧的配置文件由内核生成，**不要直接搬本目录的 `opencode.jsonc`**——那是开发域锁。
 
@@ -77,9 +78,9 @@ uv run python src/controler/kernel.py --arena --model opencode/deepseek-v4.1-fla
 uv run python scripts/dev_arena.py        # 本机验收：真容器 + 真模型 + 真网关
 ```
 
-对局参数（都有默认值，可不用管）：`--scout-sec` 侦察轮限时（默认 240 秒，到点强制收工即
-开闸；0/负数 = 不限时）、`--no-parallel` 回合改回串行（默认并行）、`--no-live-log` 关终端
-实时转播。
+对局参数（都有默认值，可不用管）：`--scout-sec` 侦察轮限时（默认 240 秒，到点硬杀强制
+收工；全员收工后统一开闸；0/负数 = 不限时）、`--no-parallel` 回合改回串行（默认并行）、
+`--no-live-log` 关终端实时转播。
 
 镜像：`docker build -t ai-battle-ai:latest arena/`。内核给每个 AI 一台容器，接线方式：
 
@@ -91,7 +92,7 @@ uv run python scripts/dev_arena.py        # 本机验收：真容器 + 真模型
 | 会话 | `POST /api/session`（`{"agent":"game","model":{"providerID":…,"id":…}}`）→ 取服务端 id → RPC `registerSession` |
 | 回合 | `docker exec <容器> /root/.opencode/bin/opencode run --auto --server http://127.0.0.1:4096 --session <id> --agent game -m <model> "<唤醒输入>"`；每个 AI 一条独立节拍、互不排队（慢的 AI 只拖慢自己） |
 | 直播 | `docker exec` 的 stdout / stderr 按行流式转播：终端 `[AI-N]` 前缀 + `runs/<id>/live/ai-N.txt`（头注限时、尾注结果；完整转写仍在 `sessions/`） |
-| 门控 | 侦察轮：插件隐藏 `syscall` + 网关兜底拒收（账本 `channel=gate`）；收工或到点（`truncated`）后 `setPhase play` 开闸 |
+| 门控 | 侦察轮：插件隐藏 `syscall` + 网关兜底拒收（账本 `channel=gate`）；**全员收工**（或各自到点硬杀，`truncated`）后整批 `setPhase play` 统一开闸，先收工者候场 |
 
 补充坑位：容器里 `opencode` 不在 PATH（内核用全路径）；`--session` 值必须以 `ses` 开头
 （服务端 id 天然满足）；免费档模型可能把 `syscall` 经由 `game` 子代理转达——合法路径，
