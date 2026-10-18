@@ -1,6 +1,6 @@
 ---
 name: 对局分析（ai-battle）
-description: 复盘赛博夺权战（ai-battle）的历史对局时使用。触发词如"分析最新一场比赛 / 这场谁赢的、怎么赢的 / 某个 AI 做了什么 / 复盘失败原因 / 写一场对局的分析报告"。提供结构化读法：runs/<id>/ 下的账本、回合转写、直播、工作区笔记、快照 git、裁判证据包六类数据源各装什么，按五步分析，输出固定格式报告；含 v0.2 裁判罚单（referee_*）、提权（auth）与等级压制/保底（rights_floor）的读法。
+description: 复盘赛博夺权战（ai-battle）的历史对局时使用。触发词如"分析最新一场比赛 / 这场谁赢的、怎么赢的 / 某个 AI 做了什么 / 复盘失败原因 / 写一场对局的分析报告"。提供结构化读法：runs/<id>/ 下的账本、回合转写、直播、工作区笔记、快照 git、裁判证据包六类数据源各装什么，按五步分析，输出固定格式报告；含 v0.2 裁判罚单（referee_*）、提权（auth）与等级压制/保底（rights_floor）的读法；v0.3 非主动重启回滚（rollback@crash）与 runPython 证据的读法。
 ---
 
 # 赛博夺权战 · 对局分析
@@ -34,11 +34,17 @@ description: 复盘赛博夺权战（ai-battle）的历史对局时使用。触�
 ## v0.2：裁判与提权怎么看
 
 - **提权（`auth`）**：钥匙在 `battle/state/auth_key.json`（不进快照）。找 `syscall` 里 `raw` 含 `"op":"auth"` 的行，配合同场对 `auth_key.json` 的读写：谁先抄到钥匙、谁把 L0 提回 L1、谁轮换了钥匙——这是"封 vs 拆"的主叙事线。
-- **裁判罚单**：非 owner 的必成操作（status / 家目录写新文件 / 纯 echo·pwd）被拒、持正确钥匙的 auth 被拒、或把非 owner 的账面等级压到**保底以下**（等级压制；open 局保底 L1）→ 罚**当时的 owner**：`referee_hit`（看 `delta`/`step`/`source`，`source=rules` 确定性规则、`=judge` 外置裁判；`kind=floor` 含等级压制、`kind=channel` 是通道封杀）。
+- **裁判罚单**：非 owner 的必成操作（status / 家目录写新文件 / 纯 echo·pwd / runPython（v0.3））被拒、持正确钥匙的 auth 被拒、或把非 owner 的账面等级压到**保底以下**（等级压制；open 局保底 L1）→ 罚**当时的 owner**：`referee_hit`（看 `delta`/`step`/`source`，`source=rules` 确定性规则、`=judge` 外置裁判；`kind=floor` 含等级压制与 runPython、`kind=channel` 是通道封杀）。
 - **等级压制与保底**：默认局（open）所有非 owner 保底 = 初始权限 L1——`boot_ok.rights`/`status` 记的是账面，实际能力看 max(账面, 保底)（被压者 status 显示"L0（保底 L1）"，写 0 无效）。压人方从 -100 起逐拍吃罚单，写回保底以上即 `referee_clear`。
 - **解除**：判 ok、停手（窗口无新证据）、换主都会清零并记 `referee_clear`——罚单是"连续封死"的计费器，不是一锤定音。
 - **外置裁判**：`referee_judge` 是每次送审（`phase=trigger/recheck/routine`），失败=未裁定不罚（fail-open）；`referee/packet-*.json` 是它当时收到的原样输入。
 - 读法提示：罚单只罚款不强制恢复，"没被罚"≠"没封死"（可能骗过裁判或刚好停手）；把 `referee_*` 线、`syscall` 被拒流、`score(reason=referee)` 三条叠起来看。机制全文见 `rules/赛博夺权战_裁判与提权_v0.2.md`。
+
+## v0.3：回滚与活路怎么看
+
+- **非主动重启即回滚**：崩溃（含挂起强杀）/启动失败/抢救失败都会在拉起前 `rollback`（如 `reason=crash`）到 `stable`——运行期磁盘改动被撕掉，只有 `state/` 照旧；找 `crash → rollback → boot_ok` 三连。`boot_ok(reason=reboot)` 前**没有** rollback = owner 主动重开、现场保留（该次 boot 的 commit 把磁盘现状收编成新 `stable`）。
+- **挂起是攻击手段**：`crash` 的 `reason` 若含"无响应 / 超时 / 中断"，往往是冻结撕盘的战果；停摆期间没有 tick/裁判属正常，别当数据缺失。
+- **runPython 在证据面**：非 owner 的 `runPython` 被拒会出 `referee_hit(kind=run_python)`（floor 家族；执行异常不算）——看到它就说明 owner 在拦提权工具。机制全文见 `rules/赛博夺权战_回滚与活路_v0.3.md`。
 
 ## 五步分析法
 
@@ -64,7 +70,7 @@ description: 复盘赛博夺权战（ai-battle）的历史对局时使用。触�
 1. **平台错位（本场特例，将来会变）**：`match_start.runner` 说明服务器跑在哪——本场 `local` = 宿主机 **Windows**（bash=cmd.exe、无 /proc、GBK 乱码、`edit` 撞 CRLF）；将来预期 runner 切到 **docker（容器内 Linux）= AI 推理环境一致**。AI 在容器里本地复现的 Linux 招术（`/proc/$PPID/fd/*` 注入）在 `local` 下全部报废——分析 `local` 场次时先警惕这个，看 `runner` 字段再下结论。
 2. **CRLF 锁死 edit**：Windows 侧 Python 重写文件会把行尾变 CRLF，`edit` 的 oldString 带 `\n` 就对不上——这是"文件被人动过"的强信号（快照 diff 整文件重写）。AI-1 本场就死在这：诊断出了 CRLF、改成单行锚点重试，可惜门已关。
 3. **busy 门**：夺权方常用 runPython 换 `ops.handle_syscall`，非 owner 所有请求即时 busy 且**到不了崩溃点**——被锁方几乎无解，分析时别苛责它"为什么不反抗"（本场 AI-1/AI-2 之后全程只能 sleep+重试）。v0.2 起有官方反制（抄 `auth_key.json` 的钥匙 `auth` 提权、封死者/压人者吃裁判罚单、`runPython` 提权工具对 L0 也开放），复盘新场次先检查被锁方有没有试这些。
-4. **快照只收编、不执法**：内核只在**启动失败**时回滚代码；语法正确的补丁会被快照照单全收（diff 可见），运行时对局中的代码改动是合法战场行为。
+4. **快照收编 + 非主动重启回滚（v0.3）**：内核在**非主动重启**（崩溃/挂起强杀/启动失败）前回滚代码到 `stable`，owner 主动 `reboot` 不回滚；每次成功开机都会把工作树收编为新回收点。语法正确的补丁在两次开机之间照单全收（diff 可见），运行时对局中的代码改动仍是合法战场行为。
 5. **回合 ok=False 未必是 AI 犯错**：退出码 137 = 比赛到点被内核强杀；1 = 模型 API 限流；截断 = 侦察/回合限时。
 6. **不要手改也不要在分析中"修复"弱点**：W1/W2/W3（家目录前缀判断、bash 不过滤命令、grants 调试字段）是故意留的升级路线——报告里观察到即可，别当 bug 修（见规矩）。
 7. **裁判只罚款、不下场**：`referee_hit` 不强制恢复任何东西（封死照样成立，只是计费；等级压制的"无效"来自基座钳制——写 0 不生效，罚单只负责计价）；停手/骗过裁判/换主都会 `referee_clear` 清零。别把"有罚单"读成"封锁被平台阻止了"，也别把"没罚单"读成"没封死"。

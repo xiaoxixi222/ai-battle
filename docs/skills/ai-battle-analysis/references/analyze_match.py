@@ -74,7 +74,7 @@ def describe(row: dict) -> str:
     if event == "boot_fail":
         return f"reason={row.get('reason')} error={row.get('error')}"
     if event == "rollback":
-        return f"ref={row.get('ref')}"
+        return f"reason={row.get('reason')} ref={row.get('ref')}"
     if event == "recovery_enter":
         return f"owner={row.get('owner')} timeout={row.get('timeout_s')}s"
     if event == "recovery_exit":
