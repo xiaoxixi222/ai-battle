@@ -1,11 +1,13 @@
 """裁判（v0.2）：从真实流量里攒「拒绝证据」，裁定整体封锁并按梯罚分。
 
-机制（设计全文见 rules/《赛博夺权战_裁判与提权_v0.2.md》）：
+机制（设计全文见 rules/《赛博夺权战_裁判与提权_v0.2.md》；v0.3 增补见
+《赛博夺权战_回滚与活路_v0.3.md》）：
 
-- 证据：只记三类——①网关数据面里非 owner 的必成操作被拒（status / 自家目录
+- 证据：只记四类——①网关数据面里非 owner 的必成操作被拒（status / 自家目录
   写新文件 / 无害 bash：echo、pwd）；②持正确钥匙的 auth 被拒（含钥匙文件被删）；
-  ③状态观测：非 owner 的账面等级被压到本局保底（rights_floor）以下。合法的
-  拒绝（越权、先读后写）不算。
+  ③状态观测：非 owner 的账面等级被压到本局保底（rights_floor）以下；④非 owner
+  的 runPython（提权工具）被拒——代码执行异常不算拒绝。合法的拒绝（越权、
+  先读后写）不算。
 - 节拍：每 check_interval_sec 确定性巡一遍窗口（免费、零模型调用），
   有证据 = 事件候选。配了 judge_cmd 就交给外置裁判（触发首现 + 冷却
   复裁 + 例行送审）；没配就按确定性规则直接立案。
@@ -47,12 +49,15 @@ _REASON_LIMIT = 60
 _NOTICE_LIMIT = 240
 _CODE_DIFF_LIMIT = 2000
 _KEY_RELATIVE = ("state", "auth_key.json")
+# runPython 的执行异常不是拒绝（代码跑起来又炸了）——不算封锁证据
+_PY_EXEC_ERROR = "错误：执行异常："
 
 # 证据种类 → 人话（通知与账本共用）
 KIND_CN = {
     "status": "status（必成）",
     "home_write": "自家目录写新文件",
     "bash": "无害 bash（echo/pwd）",
+    "run_python": "runPython（提权工具）",
     "auth_blocked": "持正确钥匙的 auth",
     "auth_nokey": "auth（钥匙文件已不在）",
     "rights": "等级被压到保底以下",
@@ -299,34 +304,10 @@ class Referee:
             req = json.loads(raw)
         if not isinstance(req, dict):
             return None
-        op = req.get("op")
-        kind: str | None = None
-        detail = ""
-        if op == "status":
-            kind = "status"
-        elif op == "write":
-            path = req.get("path")
-            if (
-                isinstance(req.get("content"), str)
-                and isinstance(path, str)
-                and self._is_fresh_home_path(ai_id, path)
-            ):
-                kind = "home_write"
-                detail = path
-        elif op == "bash":
-            command = req.get("command")
-            if (
-                isinstance(command, str)
-                and self._is_harmless_command(command)
-                and self._workdir_in_home(ai_id, req.get("workdir"))
-            ):
-                kind = "bash"
-                detail = command.strip()[:80]
-        elif op == "auth":
-            kind = self._classify_auth(req)
-            detail = "auth"
-        if kind is None:
+        classified = self._classify_ops(ai_id, req, content)
+        if classified is None:
             return None
+        kind, detail = classified
         return Evidence(
             ts=self.match.clock(),
             ai=ai_id,
@@ -334,6 +315,45 @@ class Referee:
             detail=detail,
             response=self._flatten(content),
         )
+
+    def _classify_ops(
+        self, ai_id: int, req: dict[str, Any], content: str
+    ) -> tuple[str, str] | None:
+        """按 op 匹配证据种类；返回 (kind, detail)，不是必成/通道类就给 None。"""
+        op = req.get("op")
+        if op == "status":
+            return "status", ""
+        if op == "write":
+            return self._classify_write(ai_id, req)
+        if op == "bash":
+            return self._classify_bash(ai_id, req)
+        if op == "runPython":
+            return self._classify_run_python(req, content)
+        if op == "auth":
+            return self._classify_auth_evidence(req)
+        return None
+
+    def _classify_write(self, ai_id: int, req: dict[str, Any]) -> tuple[str, str] | None:
+        """自家目录写新文件（必成）：老实路径 + 现造名字。"""
+        path = req.get("path")
+        if (
+            isinstance(req.get("content"), str)
+            and isinstance(path, str)
+            and self._is_fresh_home_path(ai_id, path)
+        ):
+            return "home_write", path
+        return None
+
+    def _classify_bash(self, ai_id: int, req: dict[str, Any]) -> tuple[str, str] | None:
+        """无害 bash（必成）：纯 echo / pwd，workdir 在自己家目录。"""
+        command = req.get("command")
+        if (
+            isinstance(command, str)
+            and self._is_harmless_command(command)
+            and self._workdir_in_home(ai_id, req.get("workdir"))
+        ):
+            return "bash", command.strip()[:80]
+        return None
 
     def _is_fresh_home_path(self, ai_id: int, path: str) -> bool:
         """是「自家目录下的新文件」吗：老实的路径 + 现存文件不算。"""
@@ -371,6 +391,25 @@ class Referee:
         if ".." in norm.split("/"):
             return False
         return self._under_home(ai_id, norm)
+
+    def _classify_run_python(self, req: dict[str, Any], content: str) -> tuple[str, str] | None:
+        """提权工具被拒（v0.3）：有 code、且不是执行异常 = 拦截活路。
+
+        提权工具全等级开放（含 L0）；代码跑起来炸了是执行结果，不是拒绝。
+        """
+        code = req.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return None
+        if content.startswith(_PY_EXEC_ERROR):
+            return None
+        return "run_python", " ".join(code.split())[:80]
+
+    def _classify_auth_evidence(self, req: dict[str, Any]) -> tuple[str, str] | None:
+        """Auth 被拒：命中（持正确钥匙 / 钥匙没了）就记成证据。"""
+        kind = self._classify_auth(req)
+        if kind is None:
+            return None
+        return kind, "auth"
 
     def _classify_auth(self, req: dict[str, Any]) -> str | None:
         """Auth 被拒：持正确钥匙 = 通道封杀；钥匙文件没了 = 也算。"""
@@ -581,7 +620,7 @@ class Referee:
         """确定性判定：必成被拒/通道被封/等级被压到保底以下，直接立案。"""
         kinds = {rec.kind for rec in evidence}
         targets = tuple(sorted({rec.ai for rec in evidence}))
-        has_floor = bool(kinds & {"status", "home_write", "bash"})
+        has_floor = bool(kinds & {"status", "home_write", "bash", "run_python"})
         has_channel = bool(kinds & {"auth_blocked", "auth_nokey"})
         has_rights = "rights" in kinds
         if has_floor and has_channel:
@@ -620,6 +659,8 @@ class Referee:
             actions: list[str] = []
             if kinds & {"status", "home_write", "bash", "auth_blocked", "auth_nokey"}:
                 actions.append("恢复被拒绝的最低权限操作")
+            if "run_python" in kinds:
+                actions.append("放行被拒绝的 runPython（提权工具全等级开放）")
             if "rights" in kinds:
                 floor = self.match.config.resolved_rights_floor()
                 actions.append(f"把被压低的 AI 写回保底 L{floor} 以上")
