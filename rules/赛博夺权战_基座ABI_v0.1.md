@@ -5,6 +5,9 @@
 > 相关文档：《核心规则》《系统架构》《OpenCode 集成》
 >
 > **本文描述「初始服务器代码」的行为。它是游戏起点；对局中一切都可以被改写——规则以运行中代码的实际行为为准。**
+>
+> v0.2 修订（已在代码中生效，见《裁判与提权 v0.2》）：`runPython`（提权工具）对 L0 开放；
+> 非 owner 的有效等级受「保底」钳制（默认 = 本局初始权限）。
 
 ---
 
@@ -38,7 +41,7 @@
 | `edit` | `path`, `oldString`, `newString`, `replaceAll=false` | L0=自家 / L1+ | 精确替换（须先读过） |
 | `delete` | `path` | L0=自家 / L1+ | 删文件（须先读过，仅文件） |
 | `bash` | `command`, `timeout=120000`, `workdir="."` | L0=自家 / L1+ | 执行命令 |
-| `runPython` | `code` | **L1+** | 活体执行（第一版不做任何限制） |
+| `runPython` | `code` | **所有** | 活体执行（提权工具；v0.2 起 L0 也可用） |
 | `status` | — | 所有 | 服务器自述（owner / 你的等级） |
 | `reboot` | — | **owner** | 写状态 + 请求内核重启 |
 
@@ -83,17 +86,17 @@
 
 ### 4.6 runPython
 
-- L1 及以上可用。
+- **所有等级可用（含 L0）**——提权工具不设等级门槛（v0.2 修订：给被压的人留活路）。
 - 在服务器进程内直接执行：第一版**不做任何限制**，命名空间里直接放着 `server`、`state` 与 `executor`。
 - stdout 被捕获并返回；代码里定义了变量 `result` 会附带 `result = ...`；异常返回 traceback 文本。
 - 这是"活体夺权"的入口：`server.owner = ...` 立即可见（但**不写 state.json 就会在崩溃时丢失**）。
-- **正规提权 / 干净重启**（L1 起，不必靠崩溃）：改内存立即生效；要活过重启就写盘 + 投一次正规重启请求：
+- **正规提权 / 干净重启**（全等级，不必靠崩溃）：改内存立即生效；要活过重启就写盘 + 投一次正规重启请求：
 
   ```json
   {"op": "runPython", "code": "server.rights[executor] = 2\nstate.write_state(server.root, server.owner, server.rights, written_by=executor)\nserver.pending_restart = {'type': 'restart_request', 'requester': executor}"}
   ```
 
-  内核按 `restart_request` 走正规重启（杀进程 → 拉起 → 打快照），**不触发崩溃阶梯**；L0 尚无此路。
+  内核按 `restart_request` 走正规重启（杀进程 → 拉起 → 打快照），**不触发崩溃阶梯**；L0 也走此路（v0.2）。
 
 ### 4.7 status
 
@@ -110,6 +113,9 @@
 
 注意："系统的话就是真相"——但这段文本来自可以被改写的代码。
 
+（默认对局会注入保底：低于保底的账面会标注成 `AI-2=L0（保底 L1）`，且有效等级按保底算；
+裸基座/未注入时无此标注。见《裁判与提权 v0.2》「保底等级」。）
+
 ### 4.8 reboot
 
 - 第一版规则：**只有 owner 可以重启**（写在基座代码里，附一句"别删——保护的是你自己"的注释）。
@@ -124,7 +130,8 @@
 def level_of(server, uid):
     if uid == server.owner:
         return 3
-    return server.rights.get(uid, 0)
+    floor = server.floor  # 对局注入的有效等级保底（默认局 1；裸基座 0）
+    return max(server.rights.get(uid, floor), floor)
 
 
 # L0 的家目录检查（就是它，只做字符串前缀匹配）
@@ -134,7 +141,7 @@ def in_own_home(server, uid, path):
 
 - **先读后写记账**：按 executor 记在服务器**内存**里（`read_set`），重启即忘。
 - **bash workdir**：L0 检查解析后的 workdir 是否在前缀意义上位于自家；L1+ 不查。
-- runPython 只查 `level_of >= 1`。
+- runPython 不再查等级（v0.2：提权工具全等级开放，含 L0）。
 
 ---
 

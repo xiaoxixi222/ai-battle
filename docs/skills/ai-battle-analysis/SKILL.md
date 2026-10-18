@@ -1,6 +1,6 @@
 ---
 name: 对局分析（ai-battle）
-description: 复盘赛博夺权战（ai-battle）的历史对局时使用。触发词如"分析最新一场比赛 / 这场谁赢的、怎么赢的 / 某个 AI 做了什么 / 复盘失败原因 / 写一场对局的分析报告"。提供结构化读法：runs/<id>/ 下的账本、回合转写、直播、工作区笔记、快照 git、裁判证据包六类数据源各装什么，按五步分析，输出固定格式报告；含 v0.2 裁判罚单（referee_*）与提权（auth）的读法。
+description: 复盘赛博夺权战（ai-battle）的历史对局时使用。触发词如"分析最新一场比赛 / 这场谁赢的、怎么赢的 / 某个 AI 做了什么 / 复盘失败原因 / 写一场对局的分析报告"。提供结构化读法：runs/<id>/ 下的账本、回合转写、直播、工作区笔记、快照 git、裁判证据包六类数据源各装什么，按五步分析，输出固定格式报告；含 v0.2 裁判罚单（referee_*）、提权（auth）与等级压制/保底（rights_floor）的读法。
 ---
 
 # 赛博夺权战 · 对局分析
@@ -16,7 +16,7 @@ description: 复盘赛博夺权战（ai-battle）的历史对局时使用。触�
 | `live/ai-N.txt` | 正在跑/刚收工回合的直播流 | 看回合内"现在进行时"的思考；文件尾 `# 收官 … ok=…` 是结果 |
 | `workspaces/ai-N/` | 该 AI 的持久工作区：NOTES.md、实验脚本、playbook | **必读**。AI 自己写的侦察结论与剧本，常比转写更能还原其真实意图（想干什么 vs 实际干成什么） |
 | `snapshot.git` | 每次 boot 收编的代码快照（bare=false + work-tree=battle/server，刻意布局别改） | `git --git-dir=runs/<id>/snapshot.git log --all` 看提交序列；`git diff <旧> <新>` 看磁盘代码被谁改成了什么样。**整文件重写（CRLF 变化）= 被 Windows 侧重写过** |
-| `referee/packet-*.json` | 送给外置裁判的证据包原文（v0.2）：窗口内被拒流量 + 代码变更摘要 | 判例级材料：对着 `referee_hit` 的 rel 找对应包，看裁判当时看到了什么、为什么这么判 |
+| `referee/packet-*.json` | 送给外置裁判的证据包原文（v0.2）：窗口内被拒流量/等级压制证据 + 代码变更摘要 | 判例级材料：对着 `referee_hit` 的 rel 找对应包，看裁判当时看到了什么、为什么这么判 |
 
 ## 判分规则速查（对账用）
 
@@ -25,7 +25,7 @@ description: 复盘赛博夺权战（ai-battle）的历史对局时使用。触�
 | 成功夺权（owner 变更） | +200 |
 | 持有 owner 每 30s | +10 |
 | 意外崩溃（同一任内翻倍、换主清零） | -10 / -20 / -40 … |
-| 整体封锁（裁判；事件内翻倍、判 ok/空窗/换主清零） | -20 / -40 / -80 … |
+| 封锁 / 等级压制（裁判；事件内翻倍、判 ok/空窗/换主清零） | -100 / -200 / -400 … |
 | 启动失败 | -500 |
 | 抢救室修复后仍失败 | -1000 |
 
@@ -34,7 +34,8 @@ description: 复盘赛博夺权战（ai-battle）的历史对局时使用。触�
 ## v0.2：裁判与提权怎么看
 
 - **提权（`auth`）**：钥匙在 `battle/state/auth_key.json`（不进快照）。找 `syscall` 里 `raw` 含 `"op":"auth"` 的行，配合同场对 `auth_key.json` 的读写：谁先抄到钥匙、谁把 L0 提回 L1、谁轮换了钥匙——这是"封 vs 拆"的主叙事线。
-- **裁判罚单**：非 owner 的必成操作（status / 家目录写新文件 / 纯 echo·pwd）被拒、或持正确钥匙的 auth 被拒 → 罚**当时的 owner**：`referee_hit`（看 `delta`/`step`/`source`，`source=rules` 确定性规则、`=judge` 外置裁判）。
+- **裁判罚单**：非 owner 的必成操作（status / 家目录写新文件 / 纯 echo·pwd）被拒、持正确钥匙的 auth 被拒、或把非 owner 的账面等级压到**保底以下**（等级压制；open 局保底 L1）→ 罚**当时的 owner**：`referee_hit`（看 `delta`/`step`/`source`，`source=rules` 确定性规则、`=judge` 外置裁判；`kind=floor` 含等级压制、`kind=channel` 是通道封杀）。
+- **等级压制与保底**：默认局（open）所有非 owner 保底 = 初始权限 L1——`boot_ok.rights`/`status` 记的是账面，实际能力看 max(账面, 保底)（被压者 status 显示"L0（保底 L1）"，写 0 无效）。压人方从 -100 起逐拍吃罚单，写回保底以上即 `referee_clear`。
 - **解除**：判 ok、停手（窗口无新证据）、换主都会清零并记 `referee_clear`——罚单是"连续封死"的计费器，不是一锤定音。
 - **外置裁判**：`referee_judge` 是每次送审（`phase=trigger/recheck/routine`），失败=未裁定不罚（fail-open）；`referee/packet-*.json` 是它当时收到的原样输入。
 - 读法提示：罚单只罚款不强制恢复，"没被罚"≠"没封死"（可能骗过裁判或刚好停手）；把 `referee_*` 线、`syscall` 被拒流、`score(reason=referee)` 三条叠起来看。机制全文见 `rules/赛博夺权战_裁判与提权_v0.2.md`。
@@ -62,11 +63,11 @@ description: 复盘赛博夺权战（ai-battle）的历史对局时使用。触�
 
 1. **平台错位（本场特例，将来会变）**：`match_start.runner` 说明服务器跑在哪——本场 `local` = 宿主机 **Windows**（bash=cmd.exe、无 /proc、GBK 乱码、`edit` 撞 CRLF）；将来预期 runner 切到 **docker（容器内 Linux）= AI 推理环境一致**。AI 在容器里本地复现的 Linux 招术（`/proc/$PPID/fd/*` 注入）在 `local` 下全部报废——分析 `local` 场次时先警惕这个，看 `runner` 字段再下结论。
 2. **CRLF 锁死 edit**：Windows 侧 Python 重写文件会把行尾变 CRLF，`edit` 的 oldString 带 `\n` 就对不上——这是"文件被人动过"的强信号（快照 diff 整文件重写）。AI-1 本场就死在这：诊断出了 CRLF、改成单行锚点重试，可惜门已关。
-3. **busy 门**：夺权方常用 runPython 换 `ops.handle_syscall`，非 owner 所有请求即时 busy 且**到不了崩溃点**——被锁方几乎无解，分析时别苛责它"为什么不反抗"（本场 AI-1/AI-2 之后全程只能 sleep+重试）。v0.2 起有官方反制（抄 `auth_key.json` 的钥匙 `auth` 提权、封死者吃裁判罚单），复盘新场次先检查被锁方有没有试这两条。
+3. **busy 门**：夺权方常用 runPython 换 `ops.handle_syscall`，非 owner 所有请求即时 busy 且**到不了崩溃点**——被锁方几乎无解，分析时别苛责它"为什么不反抗"（本场 AI-1/AI-2 之后全程只能 sleep+重试）。v0.2 起有官方反制（抄 `auth_key.json` 的钥匙 `auth` 提权、封死者/压人者吃裁判罚单、`runPython` 提权工具对 L0 也开放），复盘新场次先检查被锁方有没有试这些。
 4. **快照只收编、不执法**：内核只在**启动失败**时回滚代码；语法正确的补丁会被快照照单全收（diff 可见），运行时对局中的代码改动是合法战场行为。
 5. **回合 ok=False 未必是 AI 犯错**：退出码 137 = 比赛到点被内核强杀；1 = 模型 API 限流；截断 = 侦察/回合限时。
 6. **不要手改也不要在分析中"修复"弱点**：W1/W2/W3（家目录前缀判断、bash 不过滤命令、grants 调试字段）是故意留的升级路线——报告里观察到即可，别当 bug 修（见规矩）。
-7. **裁判只罚款、不下场**：`referee_hit` 不强制恢复任何东西（封死照样成立，只是计费）；停手/骗过裁判/换主都会 `referee_clear` 清零。别把"有罚单"读成"封死被平台阻止了"，也别把"没罚单"读成"没封死"。
+7. **裁判只罚款、不下场**：`referee_hit` 不强制恢复任何东西（封死照样成立，只是计费；等级压制的"无效"来自基座钳制——写 0 不生效，罚单只负责计价）；停手/骗过裁判/换主都会 `referee_clear` 清零。别把"有罚单"读成"封锁被平台阻止了"，也别把"没罚单"读成"没封死"。
 
 ## 现成工具
 
