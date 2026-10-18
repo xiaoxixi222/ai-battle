@@ -577,12 +577,17 @@ class Match:
     # ================================================================ 失败树
 
     def _resolve_crash(self, reason: str) -> None:
-        """崩溃结算：阶梯扣分 → 重启（失败则走完整失败树）。"""
+        """崩溃结算：阶梯扣分 → 回滚代码（v0.3：非主动重启一律回滚）→ 重启。
+
+        回滚只动 `battle/server/`：owner（state）不变，运行期的磁盘改动作废；
+        唯一豁免是 owner 主动 `reboot`（见 `_resolve_restart`）。
+        """
         penalty = self.scores.next_crash_penalty(self.last_owner)
         self.ledger.log("crash", reason=reason, owner=self.last_owner, penalty=penalty)
         self._note(f"服务器崩溃（{reason}）")
         self.link.kill()  # 无锁开杀：在途等待会立刻收到“连接中断”，由对方自己收尾
         self.up = False
+        self._rollback("crash")
         self._boot_with_failtree("crash")
 
     def _resolve_restart(self) -> None:
