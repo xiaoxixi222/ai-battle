@@ -165,6 +165,47 @@ def test_kind_of() -> None:
     assert kind_of({"event": "未来事件"}) == "info"
 
 
+def test_event_line_referee() -> None:
+    """裁判三件套：罚单红 / 解除绿 / 送审灰，摘要各说各话。"""
+    hit = {
+        "rel": 61.0,
+        "event": "referee_hit",
+        "owner": 1,
+        "delta": -20,
+        "step": 1,
+        "source": "rules",
+        "reason": "必成操作被拒绝",
+        "notice": "裁判通知：…",
+    }
+    line = event_line(hit)
+    assert "referee_hit" in line
+    assert "-20" in line
+    assert "第 1 档" in line
+    assert kind_of(hit) == "bad"
+    state = MatchState()
+    state.apply(hit)
+    assert state.status_kind == "bad"
+    clear = {"rel": 121.0, "event": "referee_clear", "note": "窗口内无新证据"}
+    assert kind_of(clear) == "good"
+    assert "窗口内无新证据" in event_line(clear)
+    judge = {
+        "rel": 61.0,
+        "event": "referee_judge",
+        "phase": "trigger",
+        "verdict": "violation",
+        "reason": "整体封锁",
+        "ms": 1200,
+    }
+    assert kind_of(judge) == "muted"
+    judge_line = event_line(judge)
+    assert "违规" in judge_line
+    assert "1200ms" in judge_line
+    failed = event_line(
+        {"event": "referee_judge", "phase": "routine", "error": "裁判调用失败：超时"}
+    )
+    assert "失败" in failed
+
+
 def test_discover_matches_sorted(tmp_path: Path) -> None:
     """对局列表按账本 mtime 倒序；没有账本的目录也能列出。"""
     (tmp_path / "old").mkdir()

@@ -376,6 +376,8 @@ _SIMPLE_STATUS: dict[str, tuple[str, str]] = {
     "full_reset": ("全量重置", "warn"),
     "recovery_enter": ("抢救中", "warn"),
     "fatal": ("致命：无法恢复", "bad"),
+    "referee_hit": ("裁判罚单：封锁违规", "bad"),
+    "referee_clear": ("裁判核查已解除", "ok"),
 }
 
 
@@ -387,6 +389,7 @@ _BAD_EVENTS = {
     "crash",
     "fatal",
     "auth_fail",
+    "referee_hit",
     "wake_fail",
     "gate_fail",
     "rollback_fail",
@@ -396,7 +399,14 @@ _BAD_EVENTS = {
     "state_unreadable",
 }
 _ACCENT_EVENTS = {"owner_change", "end", "full_reset", "recovery_enter"}
-_GOOD_EVENTS = {"boot_ok", "gate_open", "scout_done", "scout_phase_end", "recovery_commit"}
+_GOOD_EVENTS = {
+    "boot_ok",
+    "gate_open",
+    "scout_done",
+    "scout_phase_end",
+    "recovery_commit",
+    "referee_clear",
+}
 _MUTED_EVENTS = {
     "arena_up",
     "arena_down",
@@ -404,6 +414,7 @@ _MUTED_EVENTS = {
     "match_start",
     "snapshot_init",
     "wake_skip",
+    "referee_judge",
 }
 _COMMON_FIELDS = {"t", "rel", "event", "ai"}
 _KIND_BY_EVENT: dict[str, str] = {
@@ -586,6 +597,35 @@ def _sum_auth_fail(row: dict[str, object]) -> str:
     return f"令牌 {_short(row.get('token_prefix'), 12)}…"
 
 
+def _sum_referee_hit(row: dict[str, object]) -> str:
+    """裁判罚单：事由、罚分与档位（来源规则或外置裁判）。"""
+    delta = _as_int(row.get("delta"))
+    step = _as_int(row.get("step"))
+    source = {"rules": "规则", "judge": "裁判"}.get(_as_str(row.get("source")), "规则")
+    delta_txt = f"{delta:+d}" if delta is not None else "只记账"
+    step_txt = f"，第 {step} 档" if step is not None else ""
+    return f"{_short(row.get('reason'), 44)}；{delta_txt}{step_txt}（来自{source}）"
+
+
+def _sum_referee_clear(row: dict[str, object]) -> str:
+    """裁判解除本轮封锁核查。"""
+    return _short(row.get("note"))
+
+
+def _sum_referee_judge(row: dict[str, object]) -> str:
+    """一次送审：阶段、结论、耗时；失败时给错误。"""
+    phase = {"trigger": "触发", "recheck": "复裁", "routine": "例行"}.get(
+        _as_str(row.get("phase")), "送审"
+    )
+    error = _as_str(row.get("error"))
+    if error:
+        return f"[{phase}] 失败：{_short(error, 44)}"
+    verdict = {"violation": "违规", "ok": "ok"}.get(_as_str(row.get("verdict")), "—")
+    ms = _as_int(row.get("ms"))
+    tail = f"；{ms}ms" if ms is not None else ""
+    return f"[{phase}] {verdict}：{_short(row.get('reason'), 40)}{tail}"
+
+
 def _sum_commit(row: dict[str, object]) -> str:
     """快照提交号。"""
     return f"commit {_short(row.get('commit'), 20)}"
@@ -645,6 +685,9 @@ _SUMMARY_FUNCS: dict[str, Callable[[dict[str, object]], str]] = {
     "arena_up": _sum_arena_up,
     "arena_gateway": _sum_arena_gateway,
     "auth_fail": _sum_auth_fail,
+    "referee_hit": _sum_referee_hit,
+    "referee_clear": _sum_referee_clear,
+    "referee_judge": _sum_referee_judge,
     "snapshot_init": _sum_commit,
     "snapshot_fail": _sum_snapshot_fail,
     "state_unreadable": _sum_error,
