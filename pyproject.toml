@@ -58,6 +58,7 @@ known-first-party = [
     "mockai",
     "orchestrator",
     "recovery",
+    "referee",
     "scoring",
     "snapshot",
     "observatory",
@@ -92,6 +93,20 @@ known-first-party = [
     "ANN401",
     "C901",
     "RUF059",
+]
+# skill 附带的复盘脚本：命令行工具，打印与宽函数都正常
+"docs/**" = [
+    "T201",
+    "INP001",
+    "C901",
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+    "D103",
+    "ANN401",
+    "PLW2901",
 ]
 # dev_match 先做 sys.path 接线再导入内核模块
 "scripts/dev_match.py" = ["E402"]

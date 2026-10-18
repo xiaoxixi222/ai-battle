@@ -49,6 +49,7 @@ from gateway import Gateway
 from ledger import Ledger
 from matchconfig import SRC_SERVER, MatchConfig
 from recovery import RecoveryRoom
+from referee import Referee
 from scoring import ScoreBoard
 from snapshot import Snapshot, force_rmtree
 
@@ -151,6 +152,7 @@ class Match:
         )
         self.scores = ScoreBoard(self.ai_ids, config.scores, self.ledger)
         self.gateway = Gateway(self)
+        self.referee = Referee(self, config.referee)
         self.recovery = RecoveryRoom(self.battle_dir, self._request_boot_from_recovery)
 
         self.state: MatchState = "idle"
@@ -161,6 +163,9 @@ class Match:
         self.recovery_deadline: float = float("inf")
         self.recovery_workspace: Path | None = None
         self.recent: deque[str] = deque(maxlen=4)
+        # 待推给各 AI 的下回合开场白通知（裁判罚单）
+        self._notices: dict[int, list[str]] = {}
+        self._notices_lock = threading.Lock()
 
         self.t0: float = 0.0
         self.end_time: float = float("inf")
@@ -195,6 +200,7 @@ class Match:
         self.end_time = self.t0 + self.config.duration_min * 60.0
         self.next_tick = self.t0 + self.config.tick_sec
         self.next_wake = self.t0 + self.config.wake_interval_sec
+        self.referee.begin(self.t0)
         if self.parallel_turns:
             start = self.t0 + self.config.wake_interval_sec
             self._next_wake_ai = dict.fromkeys(self.ai_ids, start)
@@ -226,6 +232,7 @@ class Match:
             return False
         self._settle()
         if self.state == "running" and self.up:
+            self.referee.poll(now)
             self.next_tick = self._advance(self.next_tick, self.config.tick_sec, now)
             while now >= self.next_tick:
                 self._tick()
@@ -266,6 +273,8 @@ class Match:
         points = [self.end_time]
         if self.state == "running":
             points.append(self.next_tick)
+            if self.up and self.referee.enabled:
+                points.append(self.referee.next_deadline())
         if self.driver is not None:
             if self.parallel_turns:
                 points.append(min(self._next_wake_ai.values(), default=float("inf")))
@@ -310,6 +319,20 @@ class Match:
     def workspace_dir(self, ai_id: int) -> Path:
         """AI 的本地工作区（开发期代演路径；M3 起由 AI 容器挂载同一份）。"""
         return self.match_dir / "workspaces" / f"ai-{ai_id}"
+
+    def push_notice(self, ai_id: int, text: str) -> None:
+        """给某 AI 排一条下回合开场白通知（裁判用）；每 AI 最多留 5 条。"""
+        if ai_id not in self.ai_ids:
+            return
+        with self._notices_lock:
+            box = self._notices.setdefault(ai_id, [])
+            box.append(text)
+            del box[:-5]
+
+    def take_notices(self, ai_id: int) -> list[str]:
+        """取走某 AI 的全部待推通知（读走即清）。"""
+        with self._notices_lock:
+            return self._notices.pop(ai_id, [])
 
     def rescue_briefing(self) -> str:
         """抢救室里给 owner 的说明：要干什么、还有多久、修不好会怎样。"""
@@ -397,6 +420,7 @@ class Match:
             ms=round((self.clock() - started) * 1000),
             preview=_preview(content),
         )
+        self.referee.observe(ai_id, raw, ok=ok, content=content)
         return ok, content
 
     # ================================================================ 调度内部
@@ -536,6 +560,7 @@ class Match:
             old = self.last_owner
             self.ledger.log("owner_change", old=old, new=owner)
             self.scores.reset_ladder()
+            self.scores.reset_referee()
             if owner is not None:
                 self.scores.takeover(owner)
                 self._note(f"AI-{owner} 夺权（owner：{self._owner_txt(old)} → AI-{owner}）")
@@ -713,6 +738,7 @@ class Match:
         self.last_owner = None
         self.last_rights = {}
         self.scores.reset_ladder()
+        self.scores.reset_referee()
 
     # ================================================================ 战场与快照
 

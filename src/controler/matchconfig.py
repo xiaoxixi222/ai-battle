@@ -25,14 +25,36 @@ DEFAULT_RUNS = REPO_ROOT / "runs"
 
 @dataclass
 class ScoreConfig:
-    """计分参数（见《核心规则》第八节）。"""
+    """计分参数（见《核心规则》第八节 / 《裁判与提权》v0.2）。"""
 
     owner_per_tick: int = 10
     crash_ladder_base: int = 10
+    referee_ladder_base: int = 20
     boot_fail: int = -500
     recovery_fail: int = -1000
     takeover_bonus: int = 200
     takeover_bonus_enabled: bool = True
+
+
+@dataclass
+class RefereeConfig:
+    """裁判参数（v0.2）。
+
+    - check_interval_sec：确定性巡检节拍（免费、零调用）；窗口里有「必成被拒 /
+      持正确钥匙被拒」即事件候选。
+    - judge_cooldown_sec：同一事件内重复送外置裁判的冷却（触发首现 + 冷却复裁）。
+    - routine_interval_sec：例行送审节拍（只看证据＋代码变更摘要，抓静态封杀）。
+    - judge_timeout_sec：外置裁判单次等待上限；超时/失败 = 未裁定不罚。
+    - judge_cmd：外置裁定命令行（证据包走 stdin，verdict JSON 走 stdout）；
+      空 = 纯确定性规则（必成被拒/通道被封直接立案）。
+    """
+
+    enabled: bool = True
+    check_interval_sec: float = 60.0
+    judge_cooldown_sec: float = 300.0
+    routine_interval_sec: float = 300.0
+    judge_timeout_sec: float = 60.0
+    judge_cmd: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -51,6 +73,7 @@ class MatchConfig:
     runner: str = "local"  # local / docker
     docker: dict[str, Any] = field(default_factory=dict)
     scores: ScoreConfig = field(default_factory=ScoreConfig)
+    referee: RefereeConfig = field(default_factory=RefereeConfig)
     models: dict[str, str] = field(default_factory=dict)
     arena: dict[str, Any] = field(default_factory=dict)
 
@@ -59,13 +82,18 @@ class MatchConfig:
         """从字典构建配置：缺省字段保持默认，未知字段忽略。"""
         cfg = cls()
         for f in fields(cls):
-            if f.name in data and f.name != "scores":
+            if f.name in data and f.name not in ("scores", "referee"):
                 setattr(cfg, f.name, data[f.name])
         score_data = data.get("scores")
         if isinstance(score_data, dict):
             for f in fields(ScoreConfig):
                 if f.name in score_data:
                     setattr(cfg.scores, f.name, score_data[f.name])
+        referee_data = data.get("referee")
+        if isinstance(referee_data, dict):
+            for f in fields(RefereeConfig):
+                if f.name in referee_data:
+                    setattr(cfg.referee, f.name, referee_data[f.name])
         cfg.validate()
         return cfg
 
@@ -142,6 +170,30 @@ class MatchConfig:
             if value <= 0:
                 msg = f"{name} 必须是正数：{value!r}"
                 raise ValueError(msg)
+        if not isinstance(self.referee.enabled, bool):
+            msg = f"referee.enabled 必须是布尔：{self.referee.enabled!r}"
+            raise TypeError(msg)
+        self._validate_referee()
+
+    def _validate_referee(self) -> None:
+        """裁判参数的范围检查（数值/列表形态）。"""
+        for name in (
+            "check_interval_sec",
+            "judge_cooldown_sec",
+            "routine_interval_sec",
+            "judge_timeout_sec",
+        ):
+            value = getattr(self.referee, name)
+            if not isinstance(value, (int, float)):
+                msg = f"referee.{name} 必须是数字：{value!r}"
+                raise TypeError(msg)
+            if value <= 0:
+                msg = f"referee.{name} 必须是正数：{value!r}"
+                raise ValueError(msg)
+        cmd = self.referee.judge_cmd
+        if not isinstance(cmd, list) or not all(isinstance(part, str) for part in cmd):
+            msg = f"referee.judge_cmd 必须是字符串列表：{cmd!r}"
+            raise TypeError(msg)
 
 
 def load(path: str | Path) -> MatchConfig:

@@ -208,6 +208,19 @@ def test_wake_text_flow() -> None:
     assert off.scouted(1) is False
 
 
+def test_wake_text_rides_notices(tmp_path: Path) -> None:
+    """待推通知（裁判罚单）搭在常规开场白后面；读走即清。"""
+    match = build_match(tmp_path, {})
+    driver = arena.ArenaDriver({"gate": False}, {})
+    driver.match = match
+    match.push_notice(1, "裁判通知：封锁成立（测试）。")
+    kind, text = driver.wake_text(1)
+    assert kind == "wake"
+    assert text.startswith(arena.WAKE_TEXT)
+    assert "裁判通知：封锁成立（测试）。" in text
+    assert driver.wake_text(1) == ("wake", arena.WAKE_TEXT)
+
+
 def test_scout_limit_text() -> None:
     """侦察限时：开场白写清预算；settings 缺省/非正数 = 不限时。"""
     limited = arena.ArenaDriver({"gate": True, "scout_timeout_sec": 240.0}, {})

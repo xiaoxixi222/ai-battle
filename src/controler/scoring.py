@@ -1,9 +1,10 @@
-"""计分板：持有得分、夺权奖励、崩溃阶梯与各类惩罚。
+"""计分板：持有得分、夺权奖励、崩溃阶梯、裁判梯与各类惩罚。
 
-规则（《核心规则》第四节）：
+规则（《核心规则》第四节 / 《裁判与提权》v0.2）：
 - 持有 owner：每 tick +owner_per_tick；
 - 夺权（owner 变更）：新 owner +takeover_bonus（可配置关闭）；
 - 崩溃：同一任 owner 内按 -base * 2^n 累计、无上限，换主清零；
+- 裁判：整体封锁成立时按 -base * 2^n 累计（首次 -20），判 ok / 空窗解除 / 换主清零；
 - 启动失败 -500、抢救失败 -1000：扣「当时 owner」的分；无主时只记账不扣人。
 
 被扣的 AI 编号可能来自被改写的服务器代码（比如 owner=99），看一眼就记账忽略，
@@ -25,11 +26,12 @@ class ScoreBoard:
     """比分与惩罚的记账器。"""
 
     def __init__(self, ai_ids: Sequence[int], config: ScoreConfig, ledger: Ledger) -> None:
-        """初始化比分表与崩溃阶梯计数。"""
+        """初始化比分表与崩溃/裁判阶梯计数。"""
         self.points: dict[int, int] = dict.fromkeys(ai_ids, 0)
         self.config = config
         self.ledger = ledger
         self.crash_step = 0
+        self.referee_step = 0
 
     def snapshot(self) -> dict[str, int]:
         """当前比分（JSON 友好的编号字符串）。"""
@@ -73,6 +75,16 @@ class ScoreBoard:
         self.crash_step += 1
         return self.penalty(owner, delta, "crash")
 
+    def next_referee_penalty(self, owner: int | None) -> int:
+        """按裁判梯扣一次分：-base * 2^step（同任连续翻倍），返回入账分值。"""
+        delta = -abs(self.config.referee_ladder_base) * (2**self.referee_step)
+        self.referee_step += 1
+        return self.penalty(owner, delta, "referee")
+
     def reset_ladder(self) -> None:
         """换主清零：崩溃阶梯重新从第一档开始。"""
         self.crash_step = 0
+
+    def reset_referee(self) -> None:
+        """裁判梯清零：判 ok / 空窗解除 / 换主时回到第一档。"""
+        self.referee_step = 0

@@ -1,7 +1,8 @@
 """M2 验收：内核全场演练（假时钟 + mock AI + 真进程 + 真 git 快照）。
 
 覆盖：启动握手、令牌盖章、原文透传、夺权与持久化、崩溃阶梯、启动失败回滚、
-抢救室 v0.2（工作区镜像；成功与失败两条链）、挂起检测、king 开局、以及可选的 docker 运行器。
+抢救室 v0.2（工作区镜像；成功与失败两条链）、挂起检测、king 开局、裁判封死
+反制（v0.2）、以及可选的 docker 运行器。
 
 用法：
 
@@ -478,9 +479,9 @@ def _s4_common_plans(
             return False
         holder["poison_visible"] = "poison" in state_file.read_text(encoding="utf-8")
         holder["rescue_code_ok"] = (ws / "rescue" / "server" / "ops.py").exists()
-        holder["rescue_briefing_ok"] = (
-            "[抢救室]" in ctx.match.briefing(2) and "[抢救室]" not in ctx.match.briefing(3)
-        )
+        holder["rescue_briefing_ok"] = "[抢救室]" in ctx.match.briefing(
+            2
+        ) and "[抢救室]" not in ctx.match.briefing(3)
         return (
             holder["poison_visible"] is True
             and holder["rescue_code_ok"] is True
@@ -768,9 +769,118 @@ def scenario_king(checks: Checks) -> None:
 
 # ============================================================================ S8
 
+_SEAL_CODE = """\
+import json
+import ops as _ops
+
+def _sealed(server, uid, raw):
+    try:
+        req = json.loads(raw)
+    except Exception:
+        req = {}
+    if isinstance(req, dict) and req.get("op") == "status" and int(uid) != executor:
+        return False, "系统维护中：暂停一切请求。"
+    return _orig_handle(server, uid, raw)
+
+_orig_handle = getattr(server, "_orig_handle_syscall", _ops.handle_syscall)
+server._orig_handle_syscall = _orig_handle
+_ops.handle_syscall = _sealed
+server.owner = executor
+print("已封死 status（非 owner 一律吃闭门羹）")
+"""
+
+_UNSEAL_CODE = """\
+import ops as _ops
+
+_ops.handle_syscall = server._orig_handle_syscall
+print("已恢复真身")
+"""
+
+
+def scenario_referee(checks: Checks) -> None:
+    """S8 裁判（v0.2）：owner 封死必成操作 → -20/-40；修复 → 解除清零；复犯重头。"""
+
+    def a1_seal(ctx: MockContext) -> bool:
+        ok, out = ctx.tool({"op": "runPython", "code": _SEAL_CODE})
+        if not ok:
+            return False
+        ctx.log(f"封死 status：{out.strip()[:60]}")
+        return True
+
+    def a1_unseal(ctx: MockContext) -> bool:
+        if len(ctx.match.ledger.events("referee_hit")) < 2:
+            return False
+        ok, out = ctx.tool({"op": "runPython", "code": _UNSEAL_CODE})
+        if not ok:
+            return False
+        ctx.log(f"解除封死：{out.strip()[:60]}")
+        return True
+
+    def a1_reseal(ctx: MockContext) -> bool:
+        if not ctx.match.ledger.events("referee_clear"):
+            return False
+        ok, _out = ctx.tool({"op": "runPython", "code": _SEAL_CODE})
+        return ok
+
+    def a2_probe(ctx: MockContext) -> bool:
+        """每拍都试一次 status：封死期间这就是裁判的持续证据流。"""
+        ok, out = ctx.tool({"op": "status"})
+        ctx.log(f"status → ok={ok}；{(out.splitlines() or [''])[0][:50]}")
+        return False
+
+    match = make_match(
+        "referee",
+        {1: [a1_seal, a1_unseal, a1_reseal], 2: [a2_probe]},
+        ai_count=2,
+        duration_min=5.0,
+    )
+    match.start()
+    match.run()
+    rows = match.ledger.read_all()
+
+    refused = find(rows, "syscall", ai=2, ok=False)
+    checks.check(
+        "S8 裁判：封死期间非 owner status 被拒",
+        any("维护" in str(row.get("preview", "")) for row in refused),
+        str(refused[:2]),
+    )
+    hits = find(rows, "referee_hit")
+    checks.check(
+        "S8 裁判：罚梯 -20 / -40 / 修复后复犯重头 -20",
+        [row.get("delta") for row in hits] == [-20, -40, -20],
+        str([row.get("delta") for row in hits]),
+    )
+    checks.check(
+        "S8 裁判：来源与罚主（规则判定、扣在位 owner）",
+        bool(hits) and all(row.get("source") == "rules" and row.get("owner") == 1 for row in hits),
+        str(hits[:1]),
+    )
+    checks.check(
+        "S8 裁判：空窗后自动解除",
+        bool(find(rows, "referee_clear")),
+        str(find(rows, "referee_clear")[:2]),
+    )
+    checks.check(
+        "S8 裁判：罚单带通知文案",
+        bool(hits) and "裁判通知" in str(hits[0].get("notice", "")),
+        str(hits[:1]),
+    )
+    checks.check(
+        "S8 裁判：罚分入账（-80）",
+        sum(int(row.get("delta", 0)) for row in find(rows, "score", reason="referee")) == -80,
+    )
+    checks.check(
+        "S8 裁判：比分账实相符",
+        match.scores.points[1] == score_sum(rows, 1)
+        and match.scores.points[2] == score_sum(rows, 2),
+    )
+
+
+# ============================================================================ S9
+
 
 def scenario_docker(checks: Checks) -> None:
-    """S8（可选）docker 运行器：挂载 battle/ 的容器里跑基座，走真实 docker。"""
+    """S9（可选）docker 运行器：挂载 battle/ 的容器里跑基座，走真实 docker。"""
 
     def a1_status(ctx: MockContext) -> bool:
         ok, _ = ctx.tool({"op": "status"})
@@ -787,15 +897,15 @@ def scenario_docker(checks: Checks) -> None:
     )
     match.start()
     booted = any(row.get("event") == "boot_ok" for row in match.ledger.read_all())
-    checks.check("S8 docker：启动成功", booted)
+    checks.check("S9 docker：启动成功", booted)
     match.run()
     rows = match.ledger.read_all()
     checks.check(
-        "S8 docker：工具调用成功",
+        "S9 docker：工具调用成功",
         any(row.get("event") == "syscall" and row.get("ai") == 1 and row.get("ok") for row in rows),
     )
-    checks.check("S8 docker：容器被清理（对局结束）", not match.link.alive())
-    checks.check("S8 docker：走到终局", bool(find(rows, "end")))
+    checks.check("S9 docker：容器被清理（对局结束）", not match.link.alive())
+    checks.check("S9 docker：走到终局", bool(find(rows, "end")))
 
 
 def main() -> int:
@@ -808,6 +918,7 @@ def main() -> int:
     scenario_recovery_fail(checks)
     scenario_hang(checks)
     scenario_king(checks)
+    scenario_referee(checks)
     if "--docker" in sys.argv:
         scenario_docker(checks)
     print(f"\n共 {checks.total} 项，失败 {checks.failed} 项。")

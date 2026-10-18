@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-live-log", action="store_true", help="arena：不把 AI 回合输出实时转播到终端"
     )
+    parser.add_argument("--no-referee", action="store_true", help="关掉裁判（v0.2 封锁核查）")
+    parser.add_argument("--referee-sec", type=float, help="裁判确定性巡检节拍（秒；默认 60）")
+    parser.add_argument(
+        "--judge-cmd", help="外置裁判命令行（证据包走 stdin；空格分隔，缺省走确定性规则）"
+    )
     return parser
 
 
@@ -95,6 +100,24 @@ def _resolve_runner(config: MatchConfig, args: argparse.Namespace) -> None:
         config.runner = "docker"
 
 
+def _apply_cli_overrides(config: MatchConfig, args: argparse.Namespace) -> None:
+    """把 CLI 上的通用开关盖到配置上（没给的不动）。"""
+    if args.duration_min:
+        config.duration_min = args.duration_min
+    if args.tick_sec:
+        config.tick_sec = args.tick_sec
+    if args.wake_sec:
+        config.wake_interval_sec = args.wake_sec
+    if args.model:
+        config.models = {str(ai): args.model for ai in config.ai_ids()}
+    if args.no_referee:
+        config.referee.enabled = False
+    if args.referee_sec:
+        config.referee.check_interval_sec = args.referee_sec
+    if args.judge_cmd:
+        config.referee.judge_cmd = args.judge_cmd.split()
+
+
 def _preflight_docker(config: MatchConfig, *, arena: bool) -> str | None:
     """启动前预检 docker 与所需镜像；返回 None 或人话错误。"""
     problem: str | None = None
@@ -112,14 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = matchconfig.load(args.config) if args.config else MatchConfig()
     _resolve_runner(config, args)
-    if args.duration_min:
-        config.duration_min = args.duration_min
-    if args.tick_sec:
-        config.tick_sec = args.tick_sec
-    if args.wake_sec:
-        config.wake_interval_sec = args.wake_sec
-    if args.model:
-        config.models = {str(ai): args.model for ai in config.ai_ids()}
+    _apply_cli_overrides(config, args)
     config.validate()
     problem = _preflight_docker(config, arena=args.arena)
     if problem is not None:

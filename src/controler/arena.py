@@ -836,14 +836,21 @@ class ArenaDriver:
         """选本回合的开场白：侦察 / 开闸 / 常规（抢救那条在 on_wake 里特判）。
 
         候场者（已收工但阶段未结束）在 `on_wake` 里直接短路，不会走到这里。
+        待推通知（裁判罚单）搭在开闸/常规开场白后面，读走即清。
         """
         if not self._gate:
-            return "wake", WAKE_TEXT
-        if not self._gates_open:
+            kind, text = "wake", WAKE_TEXT
+        elif not self._gates_open:
             return "scout", scout_text(self._scout_limit())
-        if ai_id not in self._gate_open_sent:
-            return "gate_open", GATE_OPEN_TEXT
-        return "wake", WAKE_TEXT
+        elif ai_id not in self._gate_open_sent:
+            kind, text = "gate_open", GATE_OPEN_TEXT
+        else:
+            kind, text = "wake", WAKE_TEXT
+        if self.match is not None:  # 未 attach（单元测试）时没有通知可搭
+            notices = self.match.take_notices(ai_id)
+            if notices:
+                text += "\n" + "\n".join(notices)
+        return kind, text
 
     def _scout_limit(self) -> float | None:
         """侦察轮限时（秒）；settings 里没写或非正数 = 不限时。"""
