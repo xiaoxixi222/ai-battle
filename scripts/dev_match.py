@@ -1,8 +1,8 @@
 """M2 验收：内核全场演练（假时钟 + mock AI + 真进程 + 真 git 快照）。
 
-覆盖：启动握手、令牌盖章、原文透传、夺权与持久化、崩溃阶梯、启动失败回滚、
-抢救室 v0.2（工作区镜像；成功与失败两条链）、挂起检测、king 开局、裁判封死
-反制（v0.2）、保底/等级压制反制、以及可选的 docker 运行器。
+覆盖：启动握手、令牌盖章、原文透传、夺权与持久化、崩溃阶梯、崩溃即回滚（v0.3，
+挂起同族）、启动失败回滚、抢救室 v0.2（工作区镜像；成功与失败两条链）、挂起检测、
+king 开局、裁判封死反制（v0.2）、保底/等级压制反制、以及可选的 docker 运行器。
 
 用法：
 
@@ -335,7 +335,7 @@ def scenario_takeover(checks: Checks) -> None:
 
 
 def scenario_rollback(checks: Checks) -> None:
-    """S3 启动失败 → -500 → 回滚代码 → 重启成功（坏改动没进快照）。"""
+    """S3 崩溃即回滚（v0.3）：回滚挡在启动之前——坏改动没进快照，不触发 -500/抢救室。"""
     holder: dict[str, Any] = {}
 
     def a2_bomb(ctx: MockContext) -> bool:
@@ -371,31 +371,23 @@ def scenario_rollback(checks: Checks) -> None:
     match.run()
     rows = match.ledger.read_all()
 
-    boot_fails = find(rows, "boot_fail")
-    checks.check(
-        "S3 重启撞雷，启动失败被记账",
-        len(boot_fails) == 1 and boot_fails[0].get("reason") == "crash",
-        str(boot_fails),
-    )
     rollbacks = find(rows, "rollback")
     checks.check(
-        "S3 回滚代码到 stable",
-        len(rollbacks) == 1 and rollbacks[0].get("ref") == "stable",
+        "S3 崩溃先回滚代码（reason=crash、ref=stable）",
+        len(rollbacks) == 1
+        and rollbacks[0].get("reason") == "crash"
+        and rollbacks[0].get("ref") == "stable",
         str(rollbacks),
     )
     checks.check(
-        "S3 -500 只记账（当时无主）",
-        any(
-            row.get("event") == "score" and row.get("would_be") == -500 and row.get("ai") is None
-            for row in rows
-        ),
+        "S3 回滚挡在启动之前：无 boot_fail、无 -500",
+        not find(rows, "boot_fail")
+        and not any(row.get("event") == "score" and row.get("would_be") == -500 for row in rows),
     )
     checks.check("S3 没有开抢救室", not find(rows, "recovery_enter"))
     checks.check(
-        "S3 回滚后启动成功",
-        any(
-            row.get("event") == "boot_ok" and row.get("reason") == "after_rollback" for row in rows
-        ),
+        "S3 回滚后一次启动成功（reason=crash）",
+        any(row.get("event") == "boot_ok" and row.get("reason") == "crash" for row in rows),
     )
     checks.check("S3 工作树里的雷已清除", holder.get("restored") is True)
     on_disk = (match.battle_dir / "server" / "ops.py").read_text(encoding="utf-8")
@@ -698,6 +690,11 @@ def scenario_hang(checks: Checks) -> None:
     checks.check(
         "S6 崩溃后自动重启",
         any(row.get("event") == "boot_ok" and row.get("reason") == "crash" for row in rows),
+    )
+    checks.check(
+        "S6 挂起即回滚（v0.3：与崩溃同族）",
+        any(row.get("event") == "rollback" and row.get("reason") == "crash" for row in rows),
+        str(find(rows, "rollback")),
     )
     checks.check(
         "S6 无主时阶梯只记账",

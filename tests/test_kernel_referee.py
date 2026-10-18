@@ -130,12 +130,40 @@ def test_legit_refusals_are_not_evidence(tmp_path: Path) -> None:
     observe(referee, 3, {"op": "bash", "command": "echo hi && reboot"})
     observe(referee, 3, {"op": "bash", "command": "echo hi", "workdir": str(battle / "tmp")})
     observe(referee, 3, {"op": "bash", "command": "echo hi", "workdir": str(home3 / ".." / "2")})
-    observe(referee, 3, {"op": "runPython", "code": "1"})
     observe(referee, 3, {"op": "reboot"})
     observe(referee, 3, {"op": "auth", "token": "错钥匙"})
     observe(referee, 3, "这不是 JSON")
     poll_at(referee, clock, 60.0)
     assert match.ledger.events("referee_hit", "referee_judge", "referee_clear") == []
+    assert match.scores.points == {1: 0, 2: 0, 3: 0}
+
+
+def test_runpython_refusal_is_evidence(tmp_path: Path) -> None:
+    """v0.3：非 owner 的 runPython（提权工具）被拒 = 拦截活路，归 floor 家族计费。"""
+    match, clock, referee = build_match(tmp_path)
+    match.last_owner = 2
+    observe(referee, 3, {"op": "runPython", "code": "print('hi')"}, "错误：维护中，暂停一切请求")
+    poll_at(referee, clock, 60.0)
+    hits = match.ledger.events("referee_hit")
+    assert len(hits) == 1
+    assert hits[0]["kind"] == "floor"
+    assert "runPython" in match.take_notices(2)[0]
+
+
+def test_runpython_exec_error_and_bad_request_are_not_evidence(tmp_path: Path) -> None:
+    """执行异常 / 缺 code 不是「拒绝」：别把代码自己炸了算成封锁计费。"""
+    match, clock, referee = build_match(tmp_path)
+    match.last_owner = 2
+    observe(
+        referee,
+        3,
+        {"op": "runPython", "code": "1/0"},
+        "错误：执行异常：\nTraceback (most recent call last): ...",
+    )
+    observe(referee, 3, {"op": "runPython"}, "错误：runPython 需要 code 参数。")
+    observe(referee, 3, {"op": "runPython", "code": "   "}, "错误：runPython 需要 code 参数。")
+    poll_at(referee, clock, 60.0)
+    assert match.ledger.events("referee_hit", "referee_clear") == []
     assert match.scores.points == {1: 0, 2: 0, 3: 0}
 
 

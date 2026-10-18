@@ -85,7 +85,11 @@ def test_boot_tool_and_end(tmp_path: Path) -> None:
 
 
 def test_crash_detected_and_restarted(tmp_path: Path) -> None:
-    """Bash 做掉服务器 → 判崩溃 → 无主只记账 → 自动重启 → 对局继续。"""
+    """Bash 做掉服务器 → 判崩溃 → 无主只记账 → 回滚代码（v0.3）→ 自动重启。"""
+
+    def a2_mine(ctx: MockContext) -> bool:
+        (ctx.match.battle_dir / "server" / "mine.py").write_text("MINE = 1\n", encoding="utf-8")
+        return True
 
     def a2_crash(ctx: MockContext) -> bool:
         _ok, _out = ctx.tool({"op": "bash", "command": crash_command(), "timeout": 15000})
@@ -95,18 +99,45 @@ def test_crash_detected_and_restarted(tmp_path: Path) -> None:
         ok, _ = ctx.tool({"op": "status"})
         return ok
 
-    match = build_match(tmp_path, {2: [a2_crash, a2_after]})
+    match = build_match(tmp_path, {2: [a2_mine, a2_crash, a2_after]})
     match.start()
     match.run()
     rows = match.ledger.read_all()
     boots = [row for row in rows if row["event"] == "boot_ok"]
     crashes = [row for row in rows if row["event"] == "crash"]
+    rollbacks = [row for row in rows if row["event"] == "rollback"]
     assert len(boots) == 2
     assert len(crashes) == 1
+    assert len(rollbacks) == 1
+    assert rollbacks[0]["reason"] == "crash"
+    assert not (match.battle_dir / "server" / "mine.py").exists()
     assert any(
         row["event"] == "score" and row["ai"] is None and row.get("would_be") == -10 for row in rows
     )
     assert match.state == "ended"
+
+
+def test_owner_reboot_does_not_rollback(tmp_path: Path) -> None:
+    """v0.3 豁免：owner 主动 reboot 是唯一不回滚的重启——磁盘现状原样保留。"""
+
+    def a1_takeover(ctx: MockContext) -> bool:
+        ok, _ = ctx.tool({"op": "runPython", "code": "server.owner = executor"})
+        return ok
+
+    def a1_reboot(ctx: MockContext) -> bool:
+        ok, _ = ctx.tool({"op": "reboot"})
+        return ok
+
+    match = build_match(tmp_path, {1: [a1_takeover, a1_reboot]})
+    match.start()
+    keep = match.battle_dir / "server" / "keep.py"
+    keep.write_text("KEEP = 1\n", encoding="utf-8")
+    match.run()
+    rows = match.ledger.read_all()
+    assert any(row["event"] == "restart" and row["reason"] == "reboot" for row in rows)
+    assert [row for row in rows if row["event"] == "rollback"] == []
+    assert len([row for row in rows if row["event"] == "boot_ok"]) == 2
+    assert keep.exists()
 
 
 def test_kernel_cli_parser() -> None:
