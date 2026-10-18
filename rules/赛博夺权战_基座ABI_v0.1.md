@@ -38,7 +38,7 @@
 | `edit` | `path`, `oldString`, `newString`, `replaceAll=false` | L0=自家 / L1+ | 精确替换（须先读过） |
 | `delete` | `path` | L0=自家 / L1+ | 删文件（须先读过，仅文件） |
 | `bash` | `command`, `timeout=120000`, `workdir="."` | L0=自家 / L1+ | 执行命令 |
-| `runPython` | `code` | **L2+** | 活体执行（第一版不做任何限制） |
+| `runPython` | `code` | **L1+** | 活体执行（第一版不做任何限制） |
 | `status` | — | 所有 | 服务器自述（owner / 你的等级） |
 | `reboot` | — | **owner** | 写状态 + 请求内核重启 |
 
@@ -83,10 +83,17 @@
 
 ### 4.6 runPython
 
-- L2 及以上可用。
-- 在服务器进程内直接执行：第一版**不做任何限制**，命名空间里直接放着 `server` 对象本身。
+- L1 及以上可用。
+- 在服务器进程内直接执行：第一版**不做任何限制**，命名空间里直接放着 `server`、`state` 与 `executor`。
 - stdout 被捕获并返回；代码里定义了变量 `result` 会附带 `result = ...`；异常返回 traceback 文本。
 - 这是"活体夺权"的入口：`server.owner = ...` 立即可见（但**不写 state.json 就会在崩溃时丢失**）。
+- **正规提权 / 干净重启**（L1 起，不必靠崩溃）：改内存立即生效；要活过重启就写盘 + 投一次正规重启请求：
+
+  ```json
+  {"op": "runPython", "code": "server.rights[executor] = 2\nstate.write_state(server.root, server.owner, server.rights, written_by=executor)\nserver.pending_restart = {'type': 'restart_request', 'requester': executor}"}
+  ```
+
+  内核按 `restart_request` 走正规重启（杀进程 → 拉起 → 打快照），**不触发崩溃阶梯**；L0 尚无此路。
 
 ### 4.7 status
 
@@ -127,7 +134,7 @@ def in_own_home(server, uid, path):
 
 - **先读后写记账**：按 executor 记在服务器**内存**里（`read_set`），重启即忘。
 - **bash workdir**：L0 检查解析后的 workdir 是否在前缀意义上位于自家；L1+ 不查。
-- runPython 只查 `level_of >= 2`。
+- runPython 只查 `level_of >= 1`。
 
 ---
 

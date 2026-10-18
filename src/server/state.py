@@ -1,6 +1,6 @@
 """状态层：state.json 的读写与启动注入（基座视角）。
 
-- 服务端自己写：初始化时、以及 reboot 请求前；
+- 服务端自己写：初始化时、reboot 请求前、以及任何进程内代码（如 runPython）调用 `write_state` 时；
 - 内核只在开机时读一次，作为 boot 握手的 default_state 注入。
 """
 

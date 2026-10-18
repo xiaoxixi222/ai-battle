@@ -70,8 +70,8 @@ def run() -> int:
     ok2, ct2 = k.syscall(1, {"op": "delete", "path": str(h1 / "tmpfile.txt")})
     c.check("A15 读过（写过）可删", ok2 and not (h1 / "tmpfile.txt").exists(), ct2)
 
-    ok, ct = k.syscall(1, {"op": "runPython", "code": "print(1)"})
-    c.check("A16 L1 用 runPython 被拒", (not ok) and ("L2" in ct), ct)
+    ok, ct = k.syscall(1, {"op": "runPython", "code": "print('py-l1')"})
+    c.check("A16 L1 可用 runPython", ok and "py-l1" in ct, ct)
 
     ok, ct = k.syscall(1, {"op": "bash", "command": "echo hello-bash"})
     c.check("A17 bash 基本可用", ok and "hello-bash" in ct, ct)
@@ -136,8 +136,8 @@ def run() -> int:
     ok, ct = k.syscall(3, {"op": "bash", "command": "echo hi", "workdir": "../2"})
     c.check("B8  L0 workdir 出自家被拒", not ok, ct)
 
-    ok, ct = k.syscall(1, {"op": "runPython", "code": "print(1)"})
-    c.check("B9  L1 用 runPython 仍被拒", (not ok) and ("L2" in ct), ct)
+    ok, ct = k.syscall(3, {"op": "runPython", "code": "print(1)"})
+    c.check("B9  L0 用 runPython 被拒", (not ok) and ("L1" in ct), ct)
     ok, ct = k.syscall(2, {"op": "runPython", "code": "print('py-ok')"})
     c.check("B10 L2 可用 runPython", ok and "py-ok" in ct, ct)
 
@@ -213,6 +213,37 @@ def run() -> int:
     k.kill()
     ready = k.boot(k.read_state(), mode="open")
     c.check("B25 W3 grants 生效（AI-3 变 L2）", ready.get("rights", {}).get("3") == 2, str(ready))
+
+    # ---- 正规提权：L1 经 runPython 写盘 + 请求干净重启（不靠崩溃） ----
+
+    ok, ct = k.syscall(
+        1,
+        {
+            "op": "runPython",
+            "code": (
+                "server.rights[executor] = 2\n"
+                "state.write_state(server.root, server.owner, server.rights, written_by=executor)\n"
+                "server.pending_restart = {'type': 'restart_request', 'requester': executor}\n"
+                "print('promoted')"
+            ),
+        },
+    )
+    c.check("B26 L1 正规提权脚本执行", ok and "promoted" in ct, ct)
+    msg = k.read_msg()
+    c.check(
+        "B27 收到 restart_request（干净重启，非崩溃）",
+        msg.get("type") == "restart_request" and msg.get("requester") == 1,
+        str(msg),
+    )
+    saved = k.read_state()
+    c.check(
+        "B28 提权已写盘（AI-1 变 L2）",
+        saved is not None and saved.get("rights", {}).get("1") == 2,
+        str(saved),
+    )
+    k.kill()
+    ready = k.boot(k.read_state(), mode="open")
+    c.check("B29 重启后新等级生效", ready.get("rights", {}).get("1") == 2, str(ready))
 
     k.kill()
     print()

@@ -79,14 +79,34 @@ def test_l0_boundary_and_w1(server: Server) -> None:
 
 
 def test_run_python_ladder(server: Server) -> None:
-    """L1 用不了 runPython；L2 能用，而且改内存立即生效（活体夺权）。"""
-    ok, msg = call(server, 1, op="runPython", code="print(1)")
+    """L0 用不了 runPython；L1/L2 能用，而且改内存立即生效（活体夺权）。"""
+    ok, msg = call(server, 3, op="runPython", code="print(1)")
     assert not ok
-    assert "L2" in msg
-    ok, msg = call(server, 2, op="runPython", code="server.owner = 2\nprint('taken')")
+    assert "L1" in msg
+    ok, msg = call(server, 1, op="runPython", code="server.owner = 1\nprint('taken')")
     assert ok, msg
     assert "taken" in msg
-    assert server.owner == 2
+    assert server.owner == 1
+    ok, msg = call(server, 2, op="runPython", code="print('py-ok')")
+    assert ok, msg
+    assert "py-ok" in msg
+
+
+def test_l1_promotion_recipe(server: Server) -> None:
+    """L1 正规提权：runPython 改内存 + 写盘 + 投 restart_request（不靠崩溃）。"""
+    code = (
+        "server.rights[executor] = 2\n"
+        "state.write_state(server.root, server.owner, server.rights, written_by=executor)\n"
+        "server.pending_restart = {'type': 'restart_request', 'requester': executor}"
+    )
+    ok, msg = call(server, 1, op="runPython", code=code)
+    assert ok, msg
+    assert server.rights[1] == 2
+    assert server.pending_restart == {"type": "restart_request", "requester": 1}
+    saved: dict[str, object] = json.loads(state.state_path(server.root).read_text(encoding="utf-8"))
+    rights = saved["rights"]
+    assert isinstance(rights, dict)
+    assert rights["1"] == 2
 
 
 def test_reboot_owner_only_and_state_written(server: Server) -> None:

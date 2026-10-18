@@ -262,7 +262,7 @@ def op_bash(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool, str]:
 
 
 def op_run_python(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool, str]:
-    """在服务器进程内执行 Python 代码（L2 专属）。"""
+    """在服务器进程内执行 Python 代码（L1 及以上）。"""
     code = args.get("code")
     if not isinstance(code, str) or not code.strip():
         return False, "错误：runPython 需要 code 参数。"
@@ -274,6 +274,7 @@ def op_run_python(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool,
         "__builtins__": __builtins__,
         "__name__": "__main__",
         "server": server,
+        "state": state,
         "executor": int(uid),
     }
     buf = io.StringIO()

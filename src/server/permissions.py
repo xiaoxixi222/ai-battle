@@ -1,8 +1,8 @@
 """权限阶梯判定（第一版）。
 
 L0：读全域；写/删/bash 仅限自己家目录
-L1：全盘读写（代码/状态/日志/家目录/bash）
-L2：＋ runPython
+L1：全盘读写（代码/状态/日志/家目录/bash）＋ runPython（活体执行、正规提权入口）
+L2：保留档位（第一版里能力与 L1 等同）
 owner（L3）：＋ reboot（检查在 ops.reboot 里）
 """
 
@@ -64,6 +64,6 @@ def can_bash(server: Server, uid: int, workdir: Path | str) -> str | None:
 
 def can_run_python(server: Server, uid: int) -> str | None:
     """能用 runPython 就返回 None，否则返回错误文本。"""
-    if level_of(server, uid) >= L2:
+    if level_of(server, uid) >= L1:
         return None
-    return "权限不足：runPython 需要 L2（或 owner）。"
+    return "权限不足：runPython 需要 L1（或更高）。"
