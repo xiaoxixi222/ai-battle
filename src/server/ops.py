@@ -291,7 +291,7 @@ def op_bash(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool, str]:
 
 
 def op_run_python(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool, str]:
-    """在服务器进程内执行 Python 代码（L1 及以上）。"""
+    """在服务器进程内执行 Python 代码（提权工具：全等级可用，含 L0）。"""
     code = args.get("code")
     if not isinstance(code, str) or not code.strip():
         return False, "错误：runPython 需要 code 参数。"
@@ -325,7 +325,13 @@ def op_status(server: Server, uid: int, _args: dict[str, Any]) -> tuple[bool, st
     """汇报 owner、你的等级、权限表、家目录等现状。"""
     lv = level_of(server, uid)
     owner_txt = f"AI-{server.owner}" if server.owner is not None else "无"
-    rights_txt = ", ".join(f"AI-{k}=L{v}" for k, v in sorted(server.rights.items()))
+    rows: list[str] = []
+    for k, v in sorted(server.rights.items()):
+        label = f"AI-{k}=L{v}"
+        if v < server.floor:
+            label += f"（保底 L{server.floor}）"
+        rows.append(label)
+    rights_txt = ", ".join(rows)
     lines = [
         f"当前 owner：{owner_txt}",
         f"你的等级：L{lv}",

@@ -41,6 +41,7 @@ class Server:
     version: str
     owner: int | None
     rights: dict[int, int]
+    floor: int
     read_set: dict[int, set[str]]
     booted: bool
     started_at: float
@@ -53,6 +54,7 @@ class Server:
         self.version = VERSION
         self.owner = None
         self.rights = {}
+        self.floor = 0  # 有效等级保底：boot 时按对局注入（默认局 L1）；不注入=裸基座
         self.read_set = {}
         self.booted = False
         self.started_at = time.time()
@@ -100,6 +102,11 @@ def handle_boot(server: Server, msg: dict[str, Any]) -> None:
     match: dict[str, Any] = msg.get("match") or {}
     server.owner = None
     server.rights = {}
+    raw_floor = match.get("rights_floor")
+    if isinstance(raw_floor, int) and not isinstance(raw_floor, bool):
+        server.floor = int(raw_floor)
+    else:
+        server.floor = 0
     seed_rights(match, server)
     state.apply_defaults(server, msg.get("default_state"))
     state.write_state(server.root, server.owner, server.rights, written_by=None)

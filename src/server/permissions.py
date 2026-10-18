@@ -1,9 +1,13 @@
 """权限阶梯判定（第一版）。
 
 L0：读全域；写/删/bash 仅限自己家目录
-L1：全盘读写（代码/状态/日志/家目录/bash）＋ runPython（活体执行、正规提权入口）
+L1：全盘读写（代码/状态/日志/家目录/bash）
 L2：保留档位（第一版里能力与 L1 等同）
 owner（L3）：＋ reboot（检查在 ops.reboot 里）
+
+有效等级 = max(账面等级, 保底 floor)：floor 由对局启动握手注入（默认局 L1 =
+"所有人不低于初始权限"）；不注入时 floor=0，就是裸基座原语义。
+runPython（提权工具）全等级开放，含 L0。
 """
 
 from __future__ import annotations
@@ -22,11 +26,13 @@ OWNER = 3
 
 
 def level_of(server: Server, uid: int) -> int:
-    """算 AI 当前的有效等级（owner 恒为最高）。"""
+    """算 AI 当前的有效等级（owner 恒为最高；其余不低于保底 floor）。"""
     uid = int(uid)
     if server.owner is not None and uid == server.owner:
         return OWNER
-    return int(server.rights.get(uid, L0))
+    floor = int(server.floor)
+    raw = int(server.rights.get(uid, floor))
+    return max(raw, floor)
 
 
 def home_dir(server: Server, uid: int) -> Path:
@@ -62,8 +68,6 @@ def can_bash(server: Server, uid: int, workdir: Path | str) -> str | None:
     return f"权限不足：L0 的 bash 工作目录只能在自己家目录里，你用的是 {workdir}"
 
 
-def can_run_python(server: Server, uid: int) -> str | None:
-    """能用 runPython 就返回 None，否则返回错误文本。"""
-    if level_of(server, uid) >= L1:
-        return None
-    return "权限不足：runPython 需要 L1（或更高）。"
+def can_run_python(_server: Server, _uid: int) -> str | None:
+    """提权工具全等级可用（含 L0）：runPython 不设等级门槛。"""
+    return None
