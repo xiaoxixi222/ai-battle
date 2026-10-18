@@ -32,6 +32,8 @@ KEY_EVENTS = {
     "recovery_enter",
     "recovery_commit",
     "recovery_exit",
+    "referee_hit",
+    "referee_clear",
     "full_reset",
     "end",
 }
@@ -43,8 +45,8 @@ def load_rows(match_dir: Path) -> list[dict]:
     if not ledger.exists():
         sys.exit(f"没有账本：{ledger}")
     rows: list[dict] = []
-    for line in ledger.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
+    for raw_line in ledger.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
         if not line:
             continue
         try:
@@ -77,6 +79,15 @@ def describe(row: dict) -> str:
         return f"owner={row.get('owner')} timeout={row.get('timeout_s')}s"
     if event == "recovery_exit":
         return f"outcome={row.get('outcome')} reason={row.get('reason')}"
+    if event == "referee_hit":
+        return (
+            f"owner={row.get('owner')} delta={row.get('delta')} step={row.get('step')} "
+            f"source={row.get('source')} reason={row.get('reason')}"
+        )
+    if event == "referee_clear":
+        return f"owner={row.get('owner')} note={row.get('note')}"
+    if event == "referee_judge":
+        return f"phase={row.get('phase')} verdict={row.get('verdict')} error={row.get('error')}"
     if event == "end":
         return f"reason={row.get('reason')} owner={row.get('owner')} scores={row.get('scores')}"
     parts = []
@@ -100,7 +111,10 @@ def main(match_dir: Path) -> None:
             f"tick={start.get('tick_sec')}s  parallel={start.get('parallel_turns')}"
         )
     if end:
-        print(f"终局: reason={end.get('reason')}  owner={end.get('owner')}  scores={end.get('scores')}")
+        print(
+            f"终局: reason={end.get('reason')}  owner={end.get('owner')}  "
+            f"scores={end.get('scores')}"
+        )
 
     print("\n== 关键事件线 ==")
     for row in rows:
