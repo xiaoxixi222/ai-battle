@@ -48,6 +48,9 @@ uv run python scripts/dev_match.py
 
 # 真时钟手跑一场 mock 对局（摘要走 stdout，诊断走 stderr）
 uv run python src/controler/kernel.py --mock tour --duration-min 2
+
+# 真容器对局（服务器 + AI 都跑 Docker；服务器默认进 Linux 容器）
+uv run python src/controler/kernel.py --arena --model opencode/<模型> --duration-min 10
 ```
 
 ## 里程碑

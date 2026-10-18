@@ -21,6 +21,7 @@ from pathlib import Path
 import matchconfig
 import mockai
 from arena import ArenaDriver
+from battlelink import check_docker_image
 from matchconfig import MatchConfig
 from orchestrator import Driver, Match
 
@@ -46,7 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--match-id", help="对局编号（缺省为时间戳）")
     parser.add_argument("--battle", help="战场目录（缺省 battle/)")
     parser.add_argument("--runs", help="账本目录（缺省 runs/）")
-    parser.add_argument("--runner", choices=["local", "docker"], help="覆盖配置里的运行器")
+    parser.add_argument(
+        "--runner",
+        choices=["local", "docker"],
+        help="覆盖配置里的运行器（缺省：arena 用 docker，其余 local）",
+    )
     parser.add_argument("--duration-min", type=float, help="覆盖对局时长（分钟）")
     parser.add_argument("--tick-sec", type=float, help="覆盖心跳间隔（秒）")
     parser.add_argument("--wake-sec", type=float, help="覆盖唤醒间隔（秒）")
@@ -72,14 +77,41 @@ def _apply_arena_overrides(config: MatchConfig, args: argparse.Namespace) -> Non
         config.arena["live_log"] = False
 
 
+def _resolve_runner(config: MatchConfig, args: argparse.Namespace) -> None:
+    """确定服务器的运行器：显式 `--runner` 优先；真实对局（arena）缺省进 Docker。
+
+    Windows 宿主的 shell 是 cmd/PowerShell，服务器跑在本地会让 AI 在容器里
+    试好的 bash 命令全废；arena 缺省把服务器放进 Linux 容器，语义与 AI 一致。
+    """
+    if args.runner:
+        config.runner = args.runner
+        if args.arena and config.runner == "local":
+            print(
+                "[kernel] 提示：服务器跑在本地（bash 语义随宿主），"
+                "要和 AI 容器一致请用 --runner docker。",
+                file=sys.stderr,
+            )
+    elif args.arena:
+        config.runner = "docker"
+
+
+def _preflight_docker(config: MatchConfig, *, arena: bool) -> str | None:
+    """启动前预检 docker 与所需镜像；返回 None 或人话错误。"""
+    problem: str | None = None
+    if config.runner == "docker":
+        problem = check_docker_image(str(config.docker_settings()["image"]))
+    if problem is None and arena:
+        problem = check_docker_image(str(config.arena_settings()["image"]))
+    return problem
+
+
 def main(argv: list[str] | None = None) -> int:
     """组装并跑完一场对局。"""
     _harden_stderr()
     parser = build_parser()
     args = parser.parse_args(argv)
     config = matchconfig.load(args.config) if args.config else MatchConfig()
-    if args.runner:
-        config.runner = args.runner
+    _resolve_runner(config, args)
     if args.duration_min:
         config.duration_min = args.duration_min
     if args.tick_sec:
@@ -89,6 +121,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.model:
         config.models = {str(ai): args.model for ai in config.ai_ids()}
     config.validate()
+    problem = _preflight_docker(config, arena=args.arena)
+    if problem is not None:
+        print(f"[kernel] {problem}", file=sys.stderr)
+        return 1
     battle = Path(args.battle) if args.battle else matchconfig.DEFAULT_BATTLE
     runs = Path(args.runs) if args.runs else matchconfig.DEFAULT_RUNS
     match_id = args.match_id or time.strftime("%Y%m%d-%H%M%S")

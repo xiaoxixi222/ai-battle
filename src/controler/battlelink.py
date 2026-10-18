@@ -1,8 +1,9 @@
 """与战斗服务器的 JSONL 进程通道。
 
 两种运行器，对上层是同一件事——一个可写可读的 stdin/stdout：
-- local：直接以子进程方式跑 battle/server/main.py（开发期）；
-- docker：docker run -i 挂载 battle/（隔离期；镜像在 M3 落地后替换为自建）。
+- local：直接以子进程方式跑 battle/server/main.py（开发/mock 期）；
+- docker：docker run -i 挂载 battle/（真实对局默认；服务器是 Linux 容器，
+  `bash` 语义与 AI 容器一致，战场文件经 bind mount 落在宿主本地）。
 
 stdout 是唯一协议通道（一行一条 JSON）；stderr 全部落进
 battle/logs/server.stderr.log，不污染协议。
@@ -50,6 +51,31 @@ def _reader(stdout: IO[str], q: queue.Queue[str | None]) -> None:
     for line in stdout:
         q.put(line)
     q.put(None)
+
+
+def check_docker_image(image: str) -> str | None:
+    """预检：Docker 可用且镜像已就绪；返回 None 或人话错误。
+
+    真实对局的服务器跑在 Linux 容器里，缺 Docker / 缺镜像时在启动前
+    给出明确提示，别让对局走进"等 ready 超时"的黑洞。
+    """
+    try:
+        probe = subprocess.run(
+            ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as err:
+        return f"docker 不可用（{err}）：需要 Docker Desktop 在运行。"
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout or "").strip().splitlines()
+        hint = detail[-1] if detail else f"镜像 {image} 不可用"
+        return f"docker 预检失败：{hint}（先 `docker pull {image}`）"
+    return None
 
 
 class BattleLink:
@@ -126,6 +152,15 @@ class BattleLink:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log_fh = self.log_path.open("a", encoding="utf-8", errors="replace")
         stderr_target: Any = self._log_fh if self._log_fh is not None else subprocess.DEVNULL
+        if self.runner == "docker":
+            # 清同名残骸：上一局没清干净时，docker run --name 会直接失败
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                subprocess.run(
+                    ["docker", "rm", "-f", self.container_name],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
         self.proc = subprocess.Popen(
             self._command(),
             stdin=subprocess.PIPE,

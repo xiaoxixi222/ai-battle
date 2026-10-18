@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "src" / "controler"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from arena import ArenaDriver
+from battlelink import check_docker_image
 from matchconfig import MatchConfig
 from mini_kernel import Checks
 from orchestrator import Match
@@ -108,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         duration_min=10.0,
         tick_sec=15.0,
         wake_interval_sec=600.0,  # 本脚本手动唤醒，不靠调度器节奏
-        runner="local",
+        runner="docker",  # 服务器进 Linux 容器：bash 语义与 AI 容器一致
         models={"1": args.model, "2": args.model},
         arena={
             "image": args.image,
@@ -121,6 +122,11 @@ def main(argv: list[str] | None = None) -> int:
         },
     )
     driver = ArenaDriver(config.arena_settings(), dict(config.models))
+    server_image = str(config.docker_settings()["image"])
+    problem = check_docker_image(server_image)
+    checks.check(f"服务器镜像存在：{server_image}", problem is None, problem or "")
+    if problem is not None:
+        return 1
     match = Match(
         config,
         battle_dir=BATTLE,

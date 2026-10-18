@@ -29,6 +29,9 @@ tmp_*
 *_tmp*
 tmp
 
+# 本地对局配置（不进版本库；示例见 README）
+match.local.json
+
 # 运行时产物
 battle/
 runs/

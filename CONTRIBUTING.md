@@ -47,7 +47,7 @@ cd ai-battle
 uv sync
 ```
 
-开发在 Windows 上进行（起步只需要 uv + Python 3.13+）；真实对局依赖 Docker Desktop，将在 M2 阶段引入。
+开发在 Windows 上进行（起步只需要 uv + Python 3.13+）；**真实对局依赖 Docker Desktop**——服务器也跑在 Linux 容器里（`bash` 语义与 AI 容器一致，战场经 bind mount 落在本地 `battle/`），本地开发与验收用 `local` 运行器。
 
 ---
 
