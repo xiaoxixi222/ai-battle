@@ -14,21 +14,36 @@ if TYPE_CHECKING:
 
 
 def test_defaults() -> None:
-    """默认配置：3 个 AI、open 开局、本地运行器。"""
+    """默认配置：3 个 AI、open 开局、本地运行器、保底 L1。"""
     cfg = MatchConfig()
     assert cfg.ai_ids() == (1, 2, 3)
     assert cfg.start_mode == "open"
     assert cfg.runner == "local"
     assert cfg.scores.takeover_bonus == 200
+    assert cfg.scores.referee_ladder_base == 100
+    assert cfg.resolved_rights_floor() == 1
+
+
+def test_rights_floor_defaults_by_mode() -> None:
+    """保底 = 初始权限：open→L1；pure/king→L0；显式配置优先。"""
+    assert MatchConfig().resolved_rights_floor() == 1
+    assert MatchConfig(start_mode="pure").resolved_rights_floor() == 0
+    assert MatchConfig(start_mode="king").resolved_rights_floor() == 0
+    assert MatchConfig(rights_floor=0).resolved_rights_floor() == 0
+    assert MatchConfig(start_mode="pure", rights_floor=1).resolved_rights_floor() == 1
 
 
 def test_from_dict_merges_scores() -> None:
     """字典覆盖：平铺字段与嵌套 scores 各自合并，未覆盖的保持默认。"""
-    cfg = MatchConfig.from_dict({"ai_count": 2, "tick_sec": 5, "scores": {"owner_per_tick": 7}})
+    cfg = MatchConfig.from_dict(
+        {"ai_count": 2, "tick_sec": 5, "rights_floor": 2, "scores": {"owner_per_tick": 7}}
+    )
     assert cfg.ai_count == 2
     assert cfg.tick_sec == 5
     assert cfg.scores.owner_per_tick == 7
     assert cfg.scores.crash_ladder_base == 10
+    assert cfg.scores.referee_ladder_base == 100
+    assert cfg.resolved_rights_floor() == 2
 
 
 def test_load_from_file(tmp_path: Path) -> None:
@@ -55,6 +70,7 @@ def test_load_rejects_non_object(tmp_path: Path) -> None:
         ("start_mode", "monarch", "start_mode 必须是 open"),
         ("runner", "vm", "runner 必须是 local 或 docker"),
         ("duration_min", 0, "duration_min 必须是正数"),
+        ("rights_floor", 4, "rights_floor 必须在 0~3"),
     ],
 )
 def test_validate_rejects_bad_values(field: str, value: object, pattern: str) -> None:

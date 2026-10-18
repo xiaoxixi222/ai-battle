@@ -135,14 +135,18 @@ class MiniKernel:
         default_state: dict[str, Any] | None,
         mode: str = "open",
         ai_ids: tuple[int, ...] = (1, 2, 3),
+        rights_floor: int | None = None,
     ) -> dict[str, Any]:
-        """拉起服务器并完成启动握手，返回 ready 消息。"""
+        """拉起服务器并完成启动握手，返回 ready 消息（rights_floor=None 不注入）。"""
         self.spawn()
+        match: dict[str, Any] = {"start_mode": mode, "ai_ids": list(ai_ids)}
+        if rights_floor is not None:
+            match["rights_floor"] = int(rights_floor)
         self.send(
             {
                 "type": "boot",
                 "default_state": default_state,
-                "match": {"start_mode": mode, "ai_ids": list(ai_ids)},
+                "match": match,
             }
         )
         return self.read_msg()

@@ -1,4 +1,4 @@
-"""裁判（v0.2）：证据分类、确定性立案、罚梯、清障与送审（内核单元测试）。
+"""裁判（v0.2）：证据分类（必成/通道/等级压制）、确定性立案、罚梯、清障与送审。
 
 不拉进程、不跑回合：直接给 Referee 喂「服务器回应」，用假时钟推巡检。
 """
@@ -30,11 +30,13 @@ class FakeClock:
         return self.now
 
 
-def build_match(tmp_path: Path, **referee_cfg: object) -> tuple[Match, FakeClock, Referee]:
+def build_match(
+    tmp_path: Path, start_mode: str = "open", **referee_cfg: object
+) -> tuple[Match, FakeClock, Referee]:
     """搭一场不启动的对局（只测裁判逻辑）。"""
     clock = FakeClock()
     settings: dict[str, Any] = dict(referee_cfg)
-    config = MatchConfig(ai_count=3, referee=RefereeConfig(**settings))
+    config = MatchConfig(ai_count=3, start_mode=start_mode, referee=RefereeConfig(**settings))
     match = Match(
         config,
         battle_dir=tmp_path / "battle",
@@ -62,15 +64,15 @@ def poll_at(referee: Referee, clock: FakeClock, now: float) -> None:
 
 
 def test_rules_ladder_clear_and_reset(tmp_path: Path) -> None:
-    """确定性立案：-20 起、同事件内翻倍；空窗解除后梯清零。"""
+    """确定性立案：-100 起、同事件内翻倍；空窗解除后梯清零。"""
     match, clock, referee = build_match(tmp_path)
     match.last_owner = 2
     observe(referee, 3, {"op": "status"}, "维护中，暂停一切请求")
     poll_at(referee, clock, 60.0)
-    assert match.scores.points[2] == -20
+    assert match.scores.points[2] == -100
     observe(referee, 3, {"op": "status"})
     poll_at(referee, clock, 120.0)
-    assert match.scores.points[2] == -60  # -20 + -40
+    assert match.scores.points[2] == -300  # -100 + -200
     hits = match.ledger.events("referee_hit")
     assert [row["step"] for row in hits] == [1, 2]
     assert all(row["source"] == "rules" for row in hits)
@@ -81,7 +83,7 @@ def test_rules_ladder_clear_and_reset(tmp_path: Path) -> None:
     # 再犯：又从第一档起
     observe(referee, 3, {"op": "bash", "command": "echo hi"})
     poll_at(referee, clock, 240.0)
-    assert match.scores.points[2] == -80
+    assert match.scores.points[2] == -400
     # owner 收到的通知（两罚单 + 一解除 + 再犯罚单）
     notices = match.take_notices(2)
     assert len(notices) == 4
@@ -97,7 +99,7 @@ def test_notice_rides_next_turn_and_is_consumed(tmp_path: Path) -> None:
     poll_at(referee, clock, 60.0)
     notice = match.take_notices(2)[0]
     assert "自家目录写新文件" in notice
-    assert "扣 20 分" in notice
+    assert "扣 100 分" in notice
     assert match.take_notices(2) == []
 
 
@@ -170,9 +172,39 @@ def test_no_owner_records_only(tmp_path: Path) -> None:
     assert hits[0]["owner"] is None
     rows = match.ledger.events("score")
     assert rows[0]["ai"] is None
-    assert rows[0]["would_be"] == -20
+    assert rows[0]["would_be"] == -100
     assert match.scores.points == {1: 0, 2: 0, 3: 0}
     assert match.take_notices(3) == []
+
+
+def test_sub_floor_rights_are_evidence(tmp_path: Path) -> None:
+    """等级压制：账面被压到保底以下 = 证据（逐拍计费）；写回保底 → 解除清零。"""
+    match, clock, referee = build_match(tmp_path)
+    match.last_owner = 2
+    match.last_rights = {1: 1, 2: 1, 3: 0}  # AI-3 被压到 L0（open 局保底 L1）
+    poll_at(referee, clock, 60.0)
+    assert match.scores.points[2] == -100
+    hit = match.ledger.events("referee_hit")[0]
+    assert hit["kind"] == "floor"
+    assert "保底" in hit["reason"]
+    assert hit["targets"] == [3]
+    assert "写回保底" in match.take_notices(2)[0]
+    poll_at(referee, clock, 120.0)  # 不整改：下一拍继续进档
+    assert match.scores.points[2] == -300
+    match.last_rights = {1: 1, 2: 1, 3: 1}  # 写回保底
+    poll_at(referee, clock, 180.0)
+    assert match.ledger.events("referee_clear")
+    assert match.scores.referee_step == 0
+
+
+def test_sub_floor_not_billed_when_mode_starts_at_l0(tmp_path: Path) -> None:
+    """pure/king 模式初始就是 L0：保底随模式，不算压制。"""
+    match, clock, referee = build_match(tmp_path, start_mode="pure")
+    match.last_owner = 2
+    match.last_rights = {1: 0, 2: 0, 3: 0}
+    poll_at(referee, clock, 60.0)
+    assert match.ledger.events("referee_hit", "referee_clear") == []
+    assert match.scores.points[2] == 0
 
 
 def test_judge_ok_and_ladder_reset(tmp_path: Path) -> None:

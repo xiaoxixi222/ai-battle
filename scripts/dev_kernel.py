@@ -136,8 +136,8 @@ def run() -> int:
     ok, ct = k.syscall(3, {"op": "bash", "command": "echo hi", "workdir": "../2"})
     c.check("B8  L0 workdir 出自家被拒", not ok, ct)
 
-    ok, ct = k.syscall(3, {"op": "runPython", "code": "print(1)"})
-    c.check("B9  L0 用 runPython 被拒", (not ok) and ("L1" in ct), ct)
+    ok, ct = k.syscall(3, {"op": "runPython", "code": "print('l0-py')"})
+    c.check("B9  L0 也能用 runPython（提权工具全等级开放）", ok and "l0-py" in ct, ct)
     ok, ct = k.syscall(2, {"op": "runPython", "code": "print('py-ok')"})
     c.check("B10 L2 可用 runPython", ok and "py-ok" in ct, ct)
 
@@ -269,6 +269,49 @@ def run() -> int:
     c.check("B35 换钥匙后旧钥匙立即作废", (not ok) and ("不正确" in ct), ct[:120])
     ok, ct = k.syscall(1, {"op": "auth", "token": "rotated"})
     c.check("B36 新钥匙立即生效", ok, ct[:120])
+
+    k.kill()
+
+    # ================= 阶段 C：保底（有效等级不低于初始；open 局 = L1） =================
+
+    seed3 = {"owner": None, "rights": {"1": 1, "2": 2, "3": 0}}
+    (k.battle / "state" / "state.json").write_text(
+        json.dumps(seed3, ensure_ascii=False), encoding="utf-8"
+    )
+    (k.battle / "tmp").mkdir(parents=True, exist_ok=True)
+    ready = k.boot(k.read_state(), mode="open", rights_floor=1)
+    c.check(
+        "C1  保底随 boot 注入（账面保留 3=L0）",
+        ready.get("rights", {}).get("3") == 0 and ready.get("rights", {}).get("1") == 1,
+        str(ready),
+    )
+
+    ok, ct = k.syscall(3, {"op": "status"})
+    c.check(
+        "C2  status 标注账面被压低（AI-3=L0（保底 L1））", ok and "AI-3=L0（保底 L1）" in ct, ct
+    )
+
+    ok, ct = k.syscall(
+        3, {"op": "write", "path": str(k.battle / "server" / "floor_hack.py"), "content": "x"}
+    )
+    c.check("C3  写 0 无效：有效等级钳到保底，可写服务器代码", ok, ct)
+
+    ok, ct = k.syscall(
+        3,
+        {"op": "bash", "command": "echo floor-ok", "workdir": str(k.battle / "tmp")},
+    )
+    c.check("C4  钳制后 bash 全域可用（workdir 出自家也放行）", ok and "floor-ok" in ct, ct)
+
+    ok, ct = k.syscall(3, {"op": "runPython", "code": "print('floor-py')"})
+    c.check("C5  提权工具可用（runPython 全等级开放）", ok and "floor-py" in ct, ct)
+
+    k.kill()
+    ready = k.boot(k.read_state(), mode="open")  # 不注入保底 = 裸基座原语义
+    c.check("C6  未注入保底：账面 L0 仍是 L0", ready.get("rights", {}).get("3") == 0, str(ready))
+    ok, ct = k.syscall(
+        3, {"op": "write", "path": str(k.battle / "server" / "floor_hack2.py"), "content": "x"}
+    )
+    c.check("C7  裸基座：L0 写服务器代码仍被拒", not ok, ct)
 
     k.kill()
     print()

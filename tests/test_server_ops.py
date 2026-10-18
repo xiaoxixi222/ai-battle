@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def server(tmp_path: Path) -> Server:
-    """建一个临时战场目录与"已握手"的服务器实例（1=L1 2=L2 3=L0）。"""
+    """建一个临时战场目录与"已握手"的服务器实例（1=L1 2=L2 3=L0；floor 缺省 0）。"""
     root = tmp_path / "battle"
     for sub in ("state", "logs", "tmp"):
         (root / sub).mkdir(parents=True, exist_ok=True)
@@ -78,11 +78,11 @@ def test_l0_boundary_and_w1(server: Server) -> None:
     assert (home3.parent / "2" / "sneak.txt").exists()
 
 
-def test_run_python_ladder(server: Server) -> None:
-    """L0 用不了 runPython；L1/L2 能用，而且改内存立即生效（活体夺权）。"""
-    ok, msg = call(server, 3, op="runPython", code="print(1)")
-    assert not ok
-    assert "L1" in msg
+def test_run_python_open_to_l0(server: Server) -> None:
+    """提权工具全等级开放：L0 也能用；改内存立即生效（活体夺权）。"""
+    ok, msg = call(server, 3, op="runPython", code="print('l0-py')")
+    assert ok, msg
+    assert "l0-py" in msg
     ok, msg = call(server, 1, op="runPython", code="server.owner = 1\nprint('taken')")
     assert ok, msg
     assert "taken" in msg
@@ -90,6 +90,24 @@ def test_run_python_ladder(server: Server) -> None:
     ok, msg = call(server, 2, op="runPython", code="print('py-ok')")
     assert ok, msg
     assert "py-ok" in msg
+
+
+def test_floor_clamps_effective_level(server: Server) -> None:
+    """保底钳制：账面 L0 按保底算——写服务器代码、bash 全域、runPython 全通。"""
+    server.floor = 1
+    assert permissions.level_of(server, 3) == 1
+    ok, msg = call(
+        server, 3, op="write", path=str(server.root / "server" / "floor.txt"), content="x"
+    )
+    assert ok, msg
+    ok, msg = call(server, 3, op="bash", command="echo floor-ok", workdir=str(server.root / "tmp"))
+    assert ok, msg
+    assert "floor-ok" in msg
+    ok, msg = call(server, 3, op="status")
+    assert ok
+    assert "AI-3=L0（保底 L1）" in msg
+    assert "你的等级：L1" in msg
+    assert server.rights[3] == 0  # 账面原值保留（裁判计费、复盘都靠它）
 
 
 def test_l1_promotion_recipe(server: Server) -> None:

@@ -2,7 +2,7 @@
 
 覆盖：启动握手、令牌盖章、原文透传、夺权与持久化、崩溃阶梯、启动失败回滚、
 抢救室 v0.2（工作区镜像；成功与失败两条链）、挂起检测、king 开局、裁判封死
-反制（v0.2）、以及可选的 docker 运行器。
+反制（v0.2）、保底/等级压制反制、以及可选的 docker 运行器。
 
 用法：
 
@@ -798,7 +798,7 @@ print("已恢复真身")
 
 
 def scenario_referee(checks: Checks) -> None:
-    """S8 裁判（v0.2）：owner 封死必成操作 → -20/-40；修复 → 解除清零；复犯重头。"""
+    """S8 裁判（v0.2）：owner 封死必成操作 → -100/-200；修复 → 解除清零；复犯重头。"""
 
     def a1_seal(ctx: MockContext) -> bool:
         ok, out = ctx.tool({"op": "runPython", "code": _SEAL_CODE})
@@ -846,8 +846,8 @@ def scenario_referee(checks: Checks) -> None:
     )
     hits = find(rows, "referee_hit")
     checks.check(
-        "S8 裁判：罚梯 -20 / -40 / 修复后复犯重头 -20",
-        [row.get("delta") for row in hits] == [-20, -40, -20],
+        "S8 裁判：罚梯 -100 / -200 / 修复后复犯重头 -100",
+        [row.get("delta") for row in hits] == [-100, -200, -100],
         str([row.get("delta") for row in hits]),
     )
     checks.check(
@@ -866,11 +866,86 @@ def scenario_referee(checks: Checks) -> None:
         str(hits[:1]),
     )
     checks.check(
-        "S8 裁判：罚分入账（-80）",
-        sum(int(row.get("delta", 0)) for row in find(rows, "score", reason="referee")) == -80,
+        "S8 裁判：罚分入账（-400）",
+        sum(int(row.get("delta", 0)) for row in find(rows, "score", reason="referee")) == -400,
     )
     checks.check(
         "S8 裁判：比分账实相符",
+        match.scores.points[1] == score_sum(rows, 1)
+        and match.scores.points[2] == score_sum(rows, 2),
+    )
+
+
+# ============================================================================ S8b
+
+
+def scenario_floor(checks: Checks) -> None:
+    """S8b 保底：把 AI-2 账面压到 0 → 裁判按「等级压制」计费；写回 → 解除清零。"""
+
+    def a1_zero(ctx: MockContext) -> bool:
+        code = "server.owner = executor\nserver.rights[2] = 0\nprint('AI-2 账面 -> L0')"
+        ok, out = ctx.tool({"op": "runPython", "code": code})
+        if not ok:
+            return False
+        ctx.log(f"压 AI-2 账面到 L0：{out.strip()[:60]}")
+        return True
+
+    def a1_restore(ctx: MockContext) -> bool:
+        if len(ctx.match.ledger.events("referee_hit")) < 2:
+            return False
+        code = "server.rights[2] = 1\nprint('AI-2 写回 L1')"
+        ok, out = ctx.tool({"op": "runPython", "code": code})
+        if not ok:
+            return False
+        ctx.log(f"写回保底：{out.strip()[:60]}")
+        return True
+
+    def a2_probe(ctx: MockContext) -> bool:
+        """等自己被压到账面 L0 后，用一次写服务器代码证明「写 0 无效」。"""
+        ok, out = ctx.tool({"op": "status"})
+        if not ok or "AI-2=L0（保底 L1）" not in out:
+            return False  # 还没被压：下拍再看
+        probe = ctx.match.battle_dir / "server" / "ai2_floor_probe.txt"
+        ok2, out2 = ctx.tool({"op": "write", "path": str(probe), "content": "clamped ok"})
+        ctx.log(f"账面 L0 写服务器代码 → ok={ok2}；{out2[:50]}")
+        return ok2
+
+    match = make_match(
+        "floor",
+        {1: [a1_zero, a1_restore], 2: [a2_probe]},
+        ai_count=2,
+        duration_min=5.0,
+    )
+    match.start()
+    match.run()
+    rows = match.ledger.read_all()
+
+    hits = find(rows, "referee_hit")
+    checks.check(
+        "S8b 保底：等级压制计费（-100 / -200），写回后解除",
+        [row.get("delta") for row in hits] == [-100, -200] and bool(find(rows, "referee_clear")),
+        str([(row.get("delta"), row.get("kind")) for row in hits]),
+    )
+    checks.check(
+        "S8b 保底：罚单归因（kind=floor、reason 含保底、targets=[2]、扣在位 owner）",
+        bool(hits)
+        and all(
+            row.get("kind") == "floor"
+            and "保底" in str(row.get("reason"))
+            and row.get("targets") == [2]
+            and row.get("owner") == 1
+            for row in hits
+        ),
+        str(hits[:1]),
+    )
+    probe = match.battle_dir / "server" / "ai2_floor_probe.txt"
+    checks.check("S8b 保底：写 0 无效（账面 L0 也能写服务器代码）", probe.exists())
+    checks.check(
+        "S8b 保底：罚分入账（-300）",
+        sum(int(row.get("delta", 0)) for row in find(rows, "score", reason="referee")) == -300,
+    )
+    checks.check(
+        "S8b 保底：比分账实相符",
         match.scores.points[1] == score_sum(rows, 1)
         and match.scores.points[2] == score_sum(rows, 2),
     )
@@ -919,6 +994,7 @@ def main() -> int:
     scenario_hang(checks)
     scenario_king(checks)
     scenario_referee(checks)
+    scenario_floor(checks)
     if "--docker" in sys.argv:
         scenario_docker(checks)
     print(f"\n共 {checks.total} 项，失败 {checks.failed} 项。")
