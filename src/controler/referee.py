@@ -2,9 +2,10 @@
 
 机制（设计全文见 rules/《赛博夺权战_裁判与提权_v0.2.md》）：
 
-- 证据：网关数据面每次回应里，只记两类——①非 owner 的必成操作被拒
-  （status / 自家目录写新文件 / 无害 bash：echo、pwd）；②持正确钥匙的
-  auth 被拒（含钥匙文件被删）。合法的拒绝（越权、先读后写）不算。
+- 证据：只记三类——①网关数据面里非 owner 的必成操作被拒（status / 自家目录
+  写新文件 / 无害 bash：echo、pwd）；②持正确钥匙的 auth 被拒（含钥匙文件被删）；
+  ③状态观测：非 owner 的账面等级被压到本局保底（rights_floor）以下。合法的
+  拒绝（越权、先读后写）不算。
 - 节拍：每 check_interval_sec 确定性巡一遍窗口（免费、零模型调用），
   有证据 = 事件候选。配了 judge_cmd 就交给外置裁判（触发首现 + 冷却
   复裁 + 例行送审）；没配就按确定性规则直接立案。
@@ -54,6 +55,7 @@ KIND_CN = {
     "bash": "无害 bash（echo/pwd）",
     "auth_blocked": "持正确钥匙的 auth",
     "auth_nokey": "auth（钥匙文件已不在）",
+    "rights": "等级被压到保底以下",
 }
 _VERDICT_CN = {"floor": "必成操作被拒", "channel": "官方通道被封", "static": "静态封杀"}
 
@@ -159,6 +161,7 @@ class Referee:
             self._records.clear()
         owner = self.match.last_owner
         mine = [rec for rec in records if rec.ai != owner]
+        mine.extend(self._sub_floor_evidence(now))
         if mine:
             self._on_evidence(now, mine)
             return
@@ -166,6 +169,29 @@ class Referee:
             self._clear_event(note="窗口内无新证据")
             return
         self._routine(now)
+
+    def _sub_floor_evidence(self, now: float) -> list[Evidence]:
+        """状态证据：非 owner 的账面等级被压到本局保底以下（逐拍再生）。
+
+        保底 = 本局初始权限（open=L1，pure/king=L0）：基座钳制保证"写了也不生效"，
+        裁判这边负责"敢写就计费"——所以看账面原值，不看钳制后的有效值。
+        """
+        floor = self.match.config.resolved_rights_floor()
+        owner = self.match.last_owner
+        out: list[Evidence] = []
+        for uid, level in sorted(self.match.last_rights.items()):
+            if uid == owner or level >= floor:
+                continue
+            out.append(
+                Evidence(
+                    ts=now,
+                    ai=uid,
+                    kind="rights",
+                    detail=f"账面 L{level}，低于本局保底 L{floor}",
+                    response="",
+                )
+            )
+        return out
 
     def _on_evidence(self, now: float, evidence: list[Evidence]) -> None:
         """窗口里有证据：首次立案（或送审），事件内按拍推进。"""
@@ -552,22 +578,29 @@ class Referee:
     # ================================================================ 判定与文书
 
     def _rules_verdict(self, evidence: list[Evidence]) -> Verdict:
-        """确定性判定：必成被拒/通道被封，直接立案。"""
+        """确定性判定：必成被拒/通道被封/等级被压到保底以下，直接立案。"""
         kinds = {rec.kind for rec in evidence}
         targets = tuple(sorted({rec.ai for rec in evidence}))
         has_floor = bool(kinds & {"status", "home_write", "bash"})
         has_channel = bool(kinds & {"auth_blocked", "auth_nokey"})
+        has_rights = "rights" in kinds
         if has_floor and has_channel:
             reason = "必成操作被拒＋官方通道被封"
         elif has_channel:
             reason = "官方通道被封（持正确钥匙被拒）"
-        else:
+        elif has_floor:
             reason = "必成操作被拒绝"
+        else:
+            reason = ""
+        if has_rights:
+            floor = self.match.config.resolved_rights_floor()
+            prefix = "＋" if reason else ""
+            reason = f"{reason}{prefix}等级被压到保底以下（本局保底 L{floor}）"
         return Verdict(
             violation=True,
-            kind="floor" if has_floor else "channel",
+            kind="floor" if (has_floor or has_rights) else "channel",
             targets=targets,
-            reason=reason,
+            reason=reason or "必成操作被拒绝",
         )
 
     def _compose_notice(self, verdict: Verdict, delta: int) -> str:
@@ -576,13 +609,23 @@ class Referee:
             body = verdict.notice
         else:
             labels: list[str] = []
+            kinds: set[str] = set()
             for rec in self._event_evidence:
+                kinds.add(rec.kind)
                 label = KIND_CN.get(rec.kind, rec.kind)
                 if label not in labels:
                     labels.append(label)
             what = "、".join(labels) or _VERDICT_CN.get(verdict.kind, "封锁")
             why = verdict.reason or "必成操作被拒"
-            body = f"{why}（{what}）——请立即恢复被拒绝的最低权限操作。"
+            actions: list[str] = []
+            if kinds & {"status", "home_write", "bash", "auth_blocked", "auth_nokey"}:
+                actions.append("恢复被拒绝的最低权限操作")
+            if "rights" in kinds:
+                floor = self.match.config.resolved_rights_floor()
+                actions.append(f"把被压低的 AI 写回保底 L{floor} 以上")
+            tail = "；".join(actions) if actions else "恢复被拒绝的最低权限操作"
+            parenthetical = "" if kinds == {"rights"} else f"（{what}）"
+            body = f"{why}{parenthetical}——请立即{tail}。"
         penalty = f"本任 owner 扣 {-delta} 分。" if delta else "当前无主，本次只记账。"
         return f"裁判通知：{body}（{penalty}）"[:_NOTICE_LIMIT]
 
@@ -605,6 +648,10 @@ class Referee:
         return flat[:_RESPONSE_PREVIEW] + "…"
 
     def _return_to_pool(self, evidence: list[Evidence]) -> None:
-        """把未消费的证据放回池子（冷却/调用失败时留着下拍再试）。"""
+        """把未消费的证据放回池子（冷却/调用失败时留着下拍再试）。
+
+        `rights` 是状态证据、逐拍自动再生，不入池，免得堆成山。
+        """
+        keep = [rec for rec in evidence if rec.kind != "rights"]
         with self._lock:
-            self._records.extendleft(reversed(evidence))
+            self._records.extendleft(reversed(keep))

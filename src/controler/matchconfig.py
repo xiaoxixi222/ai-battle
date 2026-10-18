@@ -29,7 +29,7 @@ class ScoreConfig:
 
     owner_per_tick: int = 10
     crash_ladder_base: int = 10
-    referee_ladder_base: int = 20
+    referee_ladder_base: int = 100
     boot_fail: int = -500
     recovery_fail: int = -1000
     takeover_bonus: int = 200
@@ -63,6 +63,7 @@ class MatchConfig:
 
     ai_count: int = 3
     start_mode: str = "open"  # open / pure / king（对应基座 seed_rights）
+    rights_floor: int | None = None  # 有效等级保底；None=按模式推导（open=1，pure/king=0）
     duration_min: float = 30.0
     tick_sec: float = 30.0
     wake_interval_sec: float = 90.0
@@ -100,6 +101,16 @@ class MatchConfig:
     def ai_ids(self) -> tuple[int, ...]:
         """本场对局的 AI 编号列表。"""
         return tuple(range(1, self.ai_count + 1))
+
+    def resolved_rights_floor(self) -> int:
+        """本局的有效等级保底：显式配置优先，缺省回落"初始权限"（open=1，pure/king=0）。
+
+        保底由基座钳制（写 0 无效）、由裁判计费（压到保底以下 = 违规），
+        见《裁判与提权 v0.2》"保底"一节。
+        """
+        if self.rights_floor is not None:
+            return int(self.rights_floor)
+        return 0 if self.start_mode in ("pure", "king") else 1
 
     def docker_settings(self) -> dict[str, Any]:
         """Docker 运行器的合并参数（默认值 + 配置覆盖）。"""
@@ -173,7 +184,19 @@ class MatchConfig:
         if not isinstance(self.referee.enabled, bool):
             msg = f"referee.enabled 必须是布尔：{self.referee.enabled!r}"
             raise TypeError(msg)
+        self._validate_rights_floor()
         self._validate_referee()
+
+    def _validate_rights_floor(self) -> None:
+        """保底的形态与范围检查（None = 按模式推导，合法）。"""
+        if self.rights_floor is None:
+            return
+        if not isinstance(self.rights_floor, int) or isinstance(self.rights_floor, bool):
+            msg = f"rights_floor 必须是整数或 null：{self.rights_floor!r}"
+            raise TypeError(msg)
+        if self.rights_floor not in (0, 1, 2, 3):
+            msg = f"rights_floor 必须在 0~3 之间：{self.rights_floor!r}"
+            raise ValueError(msg)
 
     def _validate_referee(self) -> None:
         """裁判参数的范围检查（数值/列表形态）。"""

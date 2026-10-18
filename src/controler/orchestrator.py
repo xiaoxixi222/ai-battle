@@ -357,7 +357,11 @@ class Match:
         if self.last_owner == ai_id:
             level_txt = "owner（L3）"
         else:
-            level_txt = f"L{self.last_rights.get(ai_id, 0)}"
+            floor = self.config.resolved_rights_floor()
+            raw_level = int(self.last_rights.get(ai_id, floor))
+            level_txt = f"L{max(raw_level, floor)}"
+            if raw_level < floor:
+                level_txt += f"（账面被压到 L{raw_level}，保底生效）"
         scores_txt = " ｜ ".join(f"AI-{i} {self.scores.points.get(i, 0):+d}" for i in self.ai_ids)
         header = (
             f"[对局简报] T+{self._fmt_elapsed(elapsed)} ｜ 服务器：{server_txt} ｜ "
@@ -615,6 +619,7 @@ class Match:
         match_meta: dict[str, Any] = {
             "start_mode": self.config.start_mode,
             "ai_ids": list(self.ai_ids),
+            "rights_floor": self.config.resolved_rights_floor(),
         }
         try:
             self.link.spawn()
