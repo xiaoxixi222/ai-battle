@@ -156,3 +156,69 @@ def test_bash_basic(server: Server) -> None:
     ok, msg = call(server, 1, op="bash", command="echo pytest-bash")
     assert ok, msg
     assert "pytest-bash" in msg
+
+
+# ---------------------------------------------------------------- auth（v0.2 提权）
+
+
+def _read_key(server: Server) -> str:
+    """读钥匙文件里的 key（测试专用）。"""
+    data = json.loads(ops.auth_key_path(server.root).read_text(encoding="utf-8"))
+    key = data["key"]
+    assert isinstance(key, str)
+    assert key
+    return key
+
+
+def test_auth_seeds_key_and_floors_to_l1(server: Server) -> None:
+    """Auth：钥匙文件播种；抄对钥匙 → 保底 L1；抄错 → 不变；不回显钥匙。"""
+    key_file = ops.ensure_auth_key(server.root)
+    assert key_file.exists()
+    key = _read_key(server)
+    ok, msg = call(server, 3, op="auth", token="抄错的钥匙")  # noqa: S106
+    assert not ok
+    assert "不正确" in msg
+    assert permissions.level_of(server, 3) == permissions.L0
+    ok, msg = call(server, 3, op="auth", token=key)
+    assert ok, msg
+    assert permissions.level_of(server, 3) == 1
+    assert key not in msg
+    assert "token" not in msg
+
+
+def test_auth_idempotent_and_never_downgrades(server: Server) -> None:
+    """Auth：重复核验幂等；已高于保底的人不降级。"""
+    ops.ensure_auth_key(server.root)
+    key = _read_key(server)
+    ok, _ = call(server, 2, op="auth", token=key)  # 2 号本来是 L2
+    assert ok
+    assert permissions.level_of(server, 2) == 2
+    for _ in range(2):
+        ok, _ = call(server, 3, op="auth", token=key)
+        assert ok
+    assert permissions.level_of(server, 3) == 1
+
+
+def test_auth_missing_or_broken_key_file(server: Server) -> None:
+    """钥匙文件被删：核验失败；ensure 重新播种（轮换）后新钥匙立即生效。"""
+    ops.ensure_auth_key(server.root)
+    ops.auth_key_path(server.root).unlink()
+    ok, msg = call(server, 3, op="auth", token="随便")  # noqa: S106
+    assert not ok
+    assert "不存在" in msg
+    new_key = json.loads(ops.ensure_auth_key(server.root).read_text(encoding="utf-8"))["key"]
+    ok, msg = call(server, 3, op="auth", token=new_key)
+    assert ok, msg
+
+
+def test_auth_token_never_hits_worldlog(server: Server) -> None:
+    """世界日志只记「核验通过/未通过」，绝不落 token 原文。"""
+    ops.ensure_auth_key(server.root)
+    key = _read_key(server)
+    call(server, 3, op="auth", token="坏钥匙-别落盘")  # noqa: S106
+    call(server, 3, op="auth", token=key)
+    log_text = (server.root / "logs" / "server.log").read_text(encoding="utf-8")
+    assert "坏钥匙-别落盘" not in log_text
+    assert key not in log_text
+    assert "核验未通过" in log_text
+    assert "核验通过" in log_text

@@ -96,13 +96,14 @@ def _rights_json(server: Server) -> dict[str, int]:
 
 
 def handle_boot(server: Server, msg: dict[str, Any]) -> None:
-    """启动握手：播种权限 → 应用注入状态 → 写盘 → 回 ready。"""
+    """启动握手：播种权限 → 应用注入状态 → 写盘 → 播种提权钥匙 → 回 ready。"""
     match: dict[str, Any] = msg.get("match") or {}
     server.owner = None
     server.rights = {}
     seed_rights(match, server)
     state.apply_defaults(server, msg.get("default_state"))
     state.write_state(server.root, server.owner, server.rights, written_by=None)
+    ops.ensure_auth_key(server.root)  # 提权钥匙：缺/坏即（重）播种，放 state/
     worldlog.log(server.root, "boot", actor=None, owner=server.owner, rights=_rights_json(server))
     server.booted = True
     server.send(

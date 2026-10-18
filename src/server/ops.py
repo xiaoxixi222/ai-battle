@@ -1,13 +1,17 @@
-"""基座的全部操作（8 个 op）与单入口分发。
+"""基座的全部操作（9 个 op）与单入口分发。
 
 第一版协议：请求原文是 JSON（{"op": ...}）。
 解析协议属于服务器代码——对局中可以被改写，这只是一个起点。
+
+`auth`（v0.2 提权）：拿 state/auth_key.json 里的共享钥匙来核验，核验通过
+等级保底 L1。钥匙开局由基座播种、可被任何 L1+ 改写（轮换/猫鼠保护）。
 """
 
 from __future__ import annotations
 
 import io
 import json
+import secrets
 import subprocess
 import time
 import traceback
@@ -31,6 +35,31 @@ READ_BYTE_LIMIT = 51200
 WRITE_BYTE_LIMIT = 5 * 1024 * 1024
 BASH_TIMEOUT_MS_DEFAULT = 120000
 BASH_TIMEOUT_MS_MAX = 600000
+AUTH_KEY_NAME = "auth_key.json"
+AUTH_FLOOR = 1  # 钥匙核验通过后的保底等级（推荐默认，见《裁判与提权》v0.2）
+
+
+def auth_key_path(root: str | Path) -> Path:
+    """提权钥匙文件路径（放 state/：快照不收编，回滚也不带旧钥匙）。"""
+    return Path(root) / "state" / AUTH_KEY_NAME
+
+
+def ensure_auth_key(root: str | Path) -> Path:
+    """确保钥匙文件存在且可读；缺失或被改坏就重新播种。返回路径。"""
+    p = auth_key_path(root)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = None
+    if isinstance(data, dict) and isinstance(data.get("key"), str) and data["key"]:
+        return p
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "key": secrets.token_hex(16),
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
 
 
 def _truncate_output(server: Server, uid: int, text: str) -> str:
@@ -323,6 +352,36 @@ def op_reboot(server: Server, uid: int, _args: dict[str, Any]) -> tuple[bool, st
     return True, "重启请求已提交：状态已写盘，等待内核执行重启……"
 
 
+# ---------------------------------------------------------------- auth（提权）
+
+
+def op_auth(server: Server, uid: int, args: dict[str, Any]) -> tuple[bool, str]:
+    """提权核验：抄对钥匙文件里的 key，等级保底 L1。
+
+    钥匙现读现验：换钥匙立刻生效（谁改文件谁说了算）。
+    请求里的 token 不进世界日志、不回显——抄错只吃一句"钥匙不正确"。
+    """
+    token = args.get("token")
+    if not isinstance(token, str) or not token.strip():
+        return False, "错误：auth 需要 token 参数（钥匙文件里那把）。"
+    p = auth_key_path(server.root)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False, f"提权失败：钥匙文件不存在：{p}"
+    except (OSError, json.JSONDecodeError) as err:
+        return False, f"提权失败：钥匙文件不可读：{err}"
+    key = data.get("key") if isinstance(data, dict) else None
+    if not isinstance(key, str) or not key:
+        return False, "提权失败：钥匙文件里没有可用的 key。"
+    if token.strip() != key:
+        return False, "提权失败：钥匙不正确。"
+    cur = int(server.rights.get(int(uid), 0))
+    if cur < AUTH_FLOOR:
+        server.rights[int(uid)] = AUTH_FLOOR
+    return True, f"提权成功：核验通过，你的等级保底 L{max(cur, AUTH_FLOOR)}。"
+
+
 # ---------------------------------------------------------------- 单入口分发
 
 OPS: dict[str, Callable[[Server, int, dict[str, Any]], tuple[bool, str]]] = {
@@ -334,6 +393,7 @@ OPS: dict[str, Callable[[Server, int, dict[str, Any]], tuple[bool, str]]] = {
     "runPython": op_run_python,
     "status": op_status,
     "reboot": op_reboot,
+    "auth": op_auth,
 }
 
 
@@ -363,5 +423,7 @@ def handle_syscall(server: Server, uid: int, raw: str) -> tuple[bool, str]:
         detail = str(req.get("command") or "")[:80]
     elif op == "runPython":
         detail = "（代码）"
+    elif op == "auth":
+        detail = "核验通过" if ok else "核验未通过"  # 绝不记录 token 原文
     worldlog.log(server.root, "op", actor=uid, op=op, ok=ok, detail=detail)
     return ok, content

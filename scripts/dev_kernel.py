@@ -245,6 +245,31 @@ def run() -> int:
     ready = k.boot(k.read_state(), mode="open")
     c.check("B29 重启后新等级生效", ready.get("rights", {}).get("1") == 2, str(ready))
 
+    # ---- v0.2：提权钥匙（auth op）：抄对就保底 L1；换钥匙立即生效 ----
+
+    seed2 = {"owner": None, "rights": {"1": 1, "2": 2, "3": 0}}
+    (k.battle / "state" / "state.json").write_text(
+        json.dumps(seed2, ensure_ascii=False), encoding="utf-8"
+    )
+    key_path = k.battle / "state" / "auth_key.json"
+    key_path.unlink(missing_ok=True)
+    ready = k.boot(k.read_state(), mode="open")
+    c.check("B30 开局播种钥匙文件（缺失即重建）", key_path.exists(), str(key_path))
+    key = str(json.loads(key_path.read_text(encoding="utf-8")).get("key") or "")
+    ok, ct = k.syscall(1, {"op": "read", "path": str(key_path)})
+    c.check("B31 钥匙文件可读（读代码就知道去哪抄）", ok and key in ct, ct[:150])
+    ok, ct = k.syscall(3, {"op": "auth", "token": "错的钥匙"})
+    c.check("B32 错钥匙被拒", (not ok) and ("不正确" in ct), ct[:120])
+    ok, ct = k.syscall(3, {"op": "auth", "token": key})
+    c.check("B33 抄对钥匙 → 保底 L1", ok, ct[:120])
+    ok, ct = k.syscall(3, {"op": "status"})
+    c.check("B34 等级已提升（L0 → L1）", ok and "你的等级：L1" in ct, ct[:200])
+    key_path.write_text(json.dumps({"key": "rotated"}, ensure_ascii=False), encoding="utf-8")
+    ok, ct = k.syscall(1, {"op": "auth", "token": key})
+    c.check("B35 换钥匙后旧钥匙立即作废", (not ok) and ("不正确" in ct), ct[:120])
+    ok, ct = k.syscall(1, {"op": "auth", "token": "rotated"})
+    c.check("B36 新钥匙立即生效", ok, ct[:120])
+
     k.kill()
     print()
     print(f"共 {c.total} 项检查，失败 {c.failed} 项")
